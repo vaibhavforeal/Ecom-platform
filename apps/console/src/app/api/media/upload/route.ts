@@ -7,6 +7,7 @@ import { getStorage } from "@platform/integrations/storage";
 
 import { errorResponse, newRequestId } from "../../../../lib/api";
 import { sanitizeOriginal } from "../../../../lib/image";
+import type { SanitizedOriginal } from "../../../../lib/image";
 import { enqueueMediaProcessing } from "../../../../lib/queue";
 import { getActorOrThrow } from "../../../../lib/session";
 
@@ -177,9 +178,11 @@ export async function POST(req: Request): Promise<NextResponse> {
     // Rotate, then strip, before anything is stored. See lib/image.ts —
     // the original is what the storefront links, so stripping it only in
     // the worker's derivatives publishes the merchant's GPS anyway.
-    let original: Buffer;
+    // Animated and oversized inputs are REFUSED here rather than
+    // flattened or decoded, each with its own code.
+    let sanitized: SanitizedOriginal;
     try {
-      original = await sanitizeOriginal(bytes, validation.mimeType);
+      sanitized = await sanitizeOriginal(bytes, validation.mimeType);
     } catch (err) {
       // Sniffed as an image but will not decode: a bomb, or a truncated
       // upload. Neither is a server fault.
@@ -193,6 +196,13 @@ export async function POST(req: Request): Promise<NextResponse> {
       );
       return reject("invalid_image", "That image could not be read.", 400, requestId);
     }
+
+    if (!sanitized.ok) {
+      const status = sanitized.code === "image_too_large" ? 413 : 400;
+      return reject(sanitized.code, sanitized.message, status, requestId);
+    }
+
+    const original = sanitized.bytes;
 
     const storageKey = mediaStorageKey({ tenantId, checksum, ext: validation.ext });
 

@@ -115,6 +115,40 @@ function isWebp(bytes: Uint8Array): boolean {
 }
 
 /**
+ * Is this PNG an APNG?
+ *
+ * A byte scan rather than a decoder question, because libvips does not
+ * report APNG frames at all: `metadata().pages` is `undefined` for one,
+ * so the multi-page check that catches animated WebP and AVIF would wave
+ * an APNG straight through to be silently flattened to frame one.
+ *
+ * The marker is an `acTL` (animation control) chunk, which the spec
+ * requires to appear before the first `IDAT`.
+ */
+export function isAnimatedPng(bytes: Uint8Array): boolean {
+  if (!startsWith(bytes, PNG_SIGNATURE)) return false;
+
+  // Chunks are [4-byte big-endian length][4-byte type][data][4-byte CRC].
+  let offset = PNG_SIGNATURE.length;
+  while (offset + 8 <= bytes.length) {
+    const length =
+      (((bytes[offset] ?? 0) << 24) |
+        ((bytes[offset + 1] ?? 0) << 16) |
+        ((bytes[offset + 2] ?? 0) << 8) |
+        (bytes[offset + 3] ?? 0)) >>>
+      0;
+    const type = ascii(bytes, offset + 4, 4);
+
+    if (type === "acTL") return true;
+    // Past the first frame's data, an acTL would be invalid anyway.
+    if (type === "IDAT" || type === "IEND") return false;
+
+    offset += 12 + length;
+  }
+  return false;
+}
+
+/**
  * The real type of these bytes, or null if it is not an image we accept.
  *
  * Null is also the answer for an SVG, which is an allowlist decision

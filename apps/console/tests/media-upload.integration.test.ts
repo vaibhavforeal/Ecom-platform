@@ -4,12 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { closeRedis } from "@platform/core";
-import { mediaStorageKey, sha256 } from "@platform/core/media";
+import { MAX_IMAGE_PIXELS, mediaStorageKey, sha256 } from "@platform/core/media";
 import { closeConnections } from "@platform/db";
 import { getStorage } from "@platform/integrations/storage";
 import postgres from "postgres";
 import sharp from "sharp";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+
+import { MAX_UPLOAD_PIXELS } from "../src/lib/image";
 
 /**
  * The upload route against real Postgres, real libvips, real object
@@ -39,8 +41,32 @@ vi.mock("next/headers", () => ({
   headers: () => Promise.resolve(new Headers()),
 }));
 
+/**
+ * The producer is stubbed, deliberately.
+ *
+ * A real `add()` puts a job on the SHARED `media` queue at whatever
+ * REDIS_URL is configured, pointing at a temp media root this file
+ * deletes in `afterAll`. A developer with a worker running then burns
+ * five retries and a backoff cycle on each before dead-lettering it —
+ * every time anyone runs the suite. `obliterate()` in `afterAll` would
+ * fix that by also wiping their genuine local jobs, which is worse.
+ *
+ * What the route owns is the CALL and its payload, and that is asserted
+ * below; the BullMQ wiring is one `queue.add` and is exercised by the
+ * live run recorded in the task report.
+ */
+const enqueued: { tenantId: string; mediaId: string }[] = [];
+let enqueueFails = false;
+
+vi.mock("../src/lib/queue", () => ({
+  enqueueMediaProcessing: (payload: { tenantId: string; mediaId: string }) => {
+    if (enqueueFails) return Promise.reject(new Error("redis unavailable"));
+    enqueued.push(payload);
+    return Promise.resolve();
+  },
+}));
+
 const { POST } = await import("../src/app/api/media/upload/route");
-const { closeQueues } = await import("../src/lib/queue");
 
 const migratorUrl = process.env.DATABASE_URL_MIGRATOR;
 if (!migratorUrl) throw new Error("DATABASE_URL_MIGRATOR must be set to run integration tests");
@@ -63,6 +89,8 @@ let tenantB: string;
 let ownerToken: string;
 let ownerUserId: string;
 let cashierToken: string;
+let tenantOrphan: string;
+let orphanToken: string;
 
 async function makeTenant(): Promise<string> {
   const slug = "u-" + randomUUID().slice(0, 12);
@@ -121,14 +149,17 @@ beforeAll(async () => {
 
   // catalog:read but NOT catalog:write — see ROLE_PERMISSIONS.
   cashierToken = (await makeSession(tenantA, "cashier")).token;
+
+  tenantOrphan = await makeTenant();
+  orphanToken = (await makeSession(tenantOrphan, "owner")).token;
 });
 
 afterEach(() => {
   sessionToken = undefined;
+  enqueueFails = false;
 });
 
 afterAll(async () => {
-  await closeQueues();
   await closeRedis();
   await admin.end();
   await closeConnections();
@@ -211,6 +242,160 @@ describe("POST /api/media/upload", () => {
     expect(await response.json()).toMatchObject({ error: { code: "file_too_large" } });
   });
 
+  it("refuses an animated WebP rather than silently flattening it", async () => {
+    sessionToken = ownerToken;
+    const rowsBefore = (await readMediaByTenant(tenantA)).length;
+    const queuedBefore = enqueued.length;
+
+    // A genuine three-frame animation: frames stacked vertically and
+    // tagged with pageHeight, which is how libvips models animation.
+    const width = 60;
+    const frameHeight = 40;
+    const frames = 3;
+    const raw = Buffer.alloc(width * frameHeight * frames * 4);
+    for (let i = 0; i < frames; i += 1) {
+      for (let p = 0; p < width * frameHeight; p += 1) {
+        const o = (i * width * frameHeight + p) * 4;
+        raw[o] = i * 80;
+        raw[o + 1] = 255 - i * 80;
+        raw[o + 2] = 30;
+        raw[o + 3] = 255;
+      }
+    }
+    const animated = await sharp(raw, {
+      raw: { width, height: frameHeight * frames, channels: 4, pageHeight: frameHeight },
+    })
+      .webp({ loop: 0, delay: 120 })
+      .toBuffer();
+
+    // Precondition: it really is multi-frame, and the sanitiser's own
+    // re-encode really would drop the frames.
+    expect((await sharp(animated, { limitInputPixels: false }).metadata()).pages).toBe(frames);
+
+    const response = await POST(
+      uploadRequest({ file: new File([animated], "spin.webp", { type: "image/webp" }) }),
+    );
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({
+      error: { code: "animated_image_unsupported" },
+    });
+    // Nothing stored, nothing queued: told, not silently degraded.
+    expect(await readMediaByTenant(tenantA)).toHaveLength(rowsBefore);
+    expect(enqueued).toHaveLength(queuedBefore);
+  });
+
+  it("refuses an APNG, which libvips reports no pages for", async () => {
+    sessionToken = ownerToken;
+    const rowsBefore = (await readMediaByTenant(tenantA)).length;
+
+    // Hand-built, because sharp will not write one: signature, IHDR,
+    // acTL (the animation control chunk), IDAT, IEND.
+    const crcTable = Array.from({ length: 256 }, (_, n) => {
+      let c = n;
+      for (let k = 0; k < 8; k += 1) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+      return c >>> 0;
+    });
+    const chunk = (type: string, data: Buffer): Buffer => {
+      const typed = Buffer.concat([Buffer.from(type, "ascii"), data]);
+      let c = 0xffffffff;
+      for (const byte of typed) c = (crcTable[(c ^ byte) & 0xff] ?? 0) ^ (c >>> 8);
+      const length = Buffer.alloc(4);
+      length.writeUInt32BE(data.length);
+      const crc = Buffer.alloc(4);
+      crc.writeUInt32BE((c ^ 0xffffffff) >>> 0);
+      return Buffer.concat([length, typed, crc]);
+    };
+    const ihdr = Buffer.alloc(13);
+    ihdr.writeUInt32BE(40, 0);
+    ihdr.writeUInt32BE(30, 4);
+    ihdr[8] = 8;
+    ihdr[9] = 2;
+    const actl = Buffer.alloc(8);
+    actl.writeUInt32BE(3, 0); // num_frames
+    const apng = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      chunk("IHDR", ihdr),
+      chunk("acTL", actl),
+      chunk("IDAT", Buffer.from([0x78, 0x9c, 0x63, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01])),
+      chunk("IEND", Buffer.alloc(0)),
+    ]);
+
+    // Precondition: sharp cannot tell. `pages` is undefined for an APNG,
+    // so the multi-page check alone would let this through.
+    expect(
+      (await sharp(apng, { limitInputPixels: false }).metadata()).pages,
+    ).toBeUndefined();
+
+    const response = await POST(
+      uploadRequest({ file: new File([apng], "loop.png", { type: "image/png" }) }),
+    );
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({
+      error: { code: "animated_image_unsupported" },
+    });
+    expect(await readMediaByTenant(tenantA)).toHaveLength(rowsBefore);
+  });
+
+  it("refuses an image above the request path's pixel ceiling", async () => {
+    sessionToken = ownerToken;
+    const rowsBefore = (await readMediaByTenant(tenantA)).length;
+
+    // The ceiling is PINNED, not read from the constant to build the
+    // fixture — a fixture sized from MAX_UPLOAD_PIXELS scales with it and
+    // the test can never fail, however high the ceiling is raised.
+    expect(MAX_UPLOAD_PIXELS).toBe(30_000_000);
+    // And it must stay BELOW the worker's: the worker decodes two at a
+    // time in its own process, this decodes unbounded inside the console.
+    expect(MAX_UPLOAD_PIXELS).toBeLessThan(MAX_IMAGE_PIXELS);
+
+    // 31.2 MP: legal, well under the 10 MB byte cap, and ~125 MB of raw
+    // pixels to decode. This is the shape that makes an unbounded
+    // web-tier decode dangerous.
+    const huge = await sharp({
+      create: { width: 6000, height: 5200, channels: 3, background: { r: 7, g: 7, b: 7 } },
+    })
+      .png()
+      .toBuffer();
+
+    expect(huge.length).toBeLessThan(1024 * 1024);
+    expect(6000 * 5200).toBeGreaterThan(MAX_UPLOAD_PIXELS);
+
+    const response = await POST(
+      uploadRequest({ file: new File([huge], "huge.png", { type: "image/png" }) }),
+    );
+
+    expect(response.status).toBe(413);
+    expect(await response.json()).toMatchObject({ error: { code: "image_too_large" } });
+    expect(await readMediaByTenant(tenantA)).toHaveLength(rowsBefore);
+  });
+
+  it("marks the row failed when the job cannot be queued", async () => {
+    // Its own tenant: this is the one negative-path test that DOES write
+    // a row, and the counts elsewhere should not have to know about it.
+    sessionToken = orphanToken;
+    enqueueFails = true;
+
+    const png = await sharp({
+      create: { width: 80, height: 80, channels: 3, background: { r: 6, g: 6, b: 6 } },
+    })
+      .png()
+      .toBuffer();
+
+    const response = await POST(
+      uploadRequest({ file: new File([png], "orphan.png", { type: "image/png" }) }),
+    );
+
+    // Redis is down. The row must not be left `pending` forever — a
+    // spinner nobody is alerted about is invisible breakage.
+    expect(response.status).toBe(500);
+
+    const rows = await readMediaByTenant(tenantOrphan);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.status).toBe("failed");
+  });
+
   it("strips EXIF from the stored ORIGINAL and bakes the orientation in", async () => {
     sessionToken = ownerToken;
 
@@ -263,6 +448,10 @@ describe("POST /api/media/upload", () => {
     expect(row.byte_size).toBe((await getStorage().get(row.storage_key)).length);
     expect(row.status).toBe("pending");
     expect(row.created_by_user_id).toBe(ownerUserId);
+
+    // The call the route owns: the worker's tenant comes from here, and
+    // getting it from anywhere else is the cross-tenant bug.
+    expect(enqueued.at(-1)).toEqual({ tenantId: tenantA, mediaId: row.id });
   });
 
   it("accepts a PNG the client named .jpg, on its real type", async () => {

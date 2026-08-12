@@ -1,0 +1,11 @@
+{
+  // The test surface, kept OUT of tsconfig.json so `next build` — which
+  // typechecks that project — does not need devDependencies installed.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    // Separate build info, or the two projects clobber each other's.
+    "incremental": false
+  },
+  "include": ["tests/**/*.ts", "vitest.integration.config.ts"],
+  "exclude": ["node_modules"]
+}

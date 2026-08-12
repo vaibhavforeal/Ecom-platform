@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   ALLOWED_IMAGE_MIME_TYPES,
   MAX_UPLOAD_BYTES,
+  isAnimatedPng,
   sniffImageMimeType,
   validateUpload,
 } from "../src/media/validate";
@@ -60,6 +61,59 @@ describe("sniffImageMimeType", () => {
     expect(sniffImageMimeType(new Uint8Array([0x89, 0x50, 0x4e]))).toBeNull();
     expect(sniffImageMimeType(new Uint8Array([0xff, 0xd8]))).toBeNull();
     expect(sniffImageMimeType(new Uint8Array(ascii("RIFF")))).toBeNull();
+  });
+});
+
+describe("isAnimatedPng", () => {
+  /** PNG chunk: [length][type][data][CRC]. The CRC is never read here. */
+  const chunk = (type: string, dataLength = 0) => [
+    (dataLength >>> 24) & 0xff,
+    (dataLength >>> 16) & 0xff,
+    (dataLength >>> 8) & 0xff,
+    dataLength & 0xff,
+    ...ascii(type),
+    ...new Array<number>(dataLength).fill(0),
+    0,
+    0,
+    0,
+    0,
+  ];
+
+  const pngWith = (...chunks: number[][]) =>
+    new Uint8Array([...png(), ...chunks.flat()]);
+
+  it("detects the acTL chunk that marks an APNG", () => {
+    // libvips reports `pages: undefined` for an APNG, so nothing else in
+    // the pipeline can tell — an undetected one is flattened to frame 1
+    // with a 201 and no warning.
+    expect(isAnimatedPng(pngWith(chunk("IHDR", 13), chunk("acTL", 8), chunk("IDAT", 4)))).toBe(
+      true,
+    );
+  });
+
+  it("does not flag a still PNG", () => {
+    expect(isAnimatedPng(pngWith(chunk("IHDR", 13), chunk("IDAT", 4), chunk("IEND")))).toBe(false);
+  });
+
+  it("stops at the first IDAT rather than scanning the whole file", () => {
+    // An `acTL` after IDAT is invalid, and trusting one would let a
+    // crafted trailer reject a perfectly good still image.
+    expect(isAnimatedPng(pngWith(chunk("IHDR", 13), chunk("IDAT", 4), chunk("acTL", 8)))).toBe(
+      false,
+    );
+  });
+
+  it("is not fooled by non-PNGs or by the string appearing in pixel data", () => {
+    expect(isAnimatedPng(jpeg(...ascii("acTL")))).toBe(false);
+    expect(isAnimatedPng(new Uint8Array(ascii("acTL")))).toBe(false);
+    // Inside a chunk's DATA, not at a chunk type offset.
+    expect(
+      isAnimatedPng(pngWith(chunk("IHDR", 13), [0, 0, 0, 8, ...ascii("tEXt"), ...ascii("acTL"), 0, 0, 0, 0, 0, 0, 0, 0], chunk("IDAT", 4))),
+    ).toBe(false);
+  });
+
+  it("terminates on a truncated chunk header", () => {
+    expect(isAnimatedPng(new Uint8Array([...png(), 0, 0, 0]))).toBe(false);
   });
 });
 
