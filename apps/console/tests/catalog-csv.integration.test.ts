@@ -495,6 +495,46 @@ describe("what an import actually changes", () => {
     expect(gone!.summary).toBeNull();
   });
 
+  it("does not put a switched-off variant back on sale through a blank cell", async () => {
+    const tenant = await makeTenant();
+    sessionToken = await makeSession(tenant, "owner");
+
+    await createProduct({
+      title: "Off Switch",
+      status: "active",
+      axes: [{ name: "Size", values: ["S", "M"] }],
+      variants: [
+        { sku: "OS-S", options: { Size: "S" }, price: "500", weightGrams: 100 },
+        // Deliberately withdrawn from sale in the console.
+        { sku: "OS-M", options: { Size: "M" }, price: "500", weightGrams: 110, isActive: false },
+      ],
+    });
+
+    // A hand-built file that CARRIES the column and leaves it empty —
+    // which is what a merchant editing a subset of columns produces. The
+    // price differs, so this is a real update rather than a skip.
+    const csv =
+      "handle,title,option1_name,option1_value,sku,price,weight_grams,variant_active\r\n" +
+      "off-switch,Off Switch,Size,S,OS-S,600,100,\r\n" +
+      "off-switch,Off Switch,Size,M,OS-M,600,110,\r\n";
+
+    const { report } = await importCsv(csv, { commit: true });
+    expect(report!.updated).toBe(1);
+
+    const rows = await admin<{ sku: string; is_active: boolean }[]>`
+      SELECT sku, is_active FROM product_variants
+      WHERE tenant_id = ${tenant} AND deleted_at IS NULL ORDER BY sku`;
+
+    // A blank cell states nothing. OS-M stays withdrawn — the merchant
+    // did not ask for it to be buyable again, and the report carries
+    // counts rather than a field-level diff, so nothing would have said
+    // it had happened.
+    expect(rows.map((r) => [r.sku, r.is_active])).toEqual([
+      ["OS-M", false],
+      ["OS-S", true],
+    ]);
+  });
+
   it("creates a product for a handle that matches nothing", async () => {
     sessionToken = token;
 
@@ -580,6 +620,91 @@ describe("the whole file, or none of it", () => {
     const [row] = await admin<{ count: string }[]>`
       SELECT count(*)::int AS count FROM products WHERE tenant_id = ${tenant}`;
     expect(Number(row!.count)).toBe(0);
+  });
+});
+
+describe("caps that only bite once the file is merged over what is stored", () => {
+  /**
+   * `csv.ts` can only count what the file says. The product that reaches
+   * the column is the file merged over the stored one — retained
+   * variants appended, option values unioned — so a cap enforced on the
+   * file alone is reachable in two imports that are each under it.
+   *
+   * What it costs: `productPayloadSchema` caps variants at 200 and an
+   * axis's values at 50, and the console's edit form parses a product
+   * back through it. Over either cap the merchant opens a product they
+   * never touched, presses Save, and gets a 422 they cannot act on.
+   */
+
+  it("refuses a five-row file that would push an option past 50 values", async () => {
+    const tenant = await makeTenant();
+    sessionToken = await makeSession(tenant, "owner");
+
+    const header = "handle,title,option1_name,option1_value,sku,price,weight_grams\r\n";
+    const row = (i: number): string => `cap-opts,Cap Opts,Size,V${i},CO-${i},10,100\r\n`;
+
+    // Fifty values exactly — at the cap, not over it.
+    const first = await importCsv(
+      header + Array.from({ length: 50 }, (_, i) => row(i)).join(""),
+      { commit: true },
+    );
+    expect(first.status).toBe(200);
+    expect(first.report!.created).toBe(1);
+
+    // Five more. The file says 5; the product would say 55.
+    const second = await importCsv(
+      header + Array.from({ length: 5 }, (_, i) => row(50 + i)).join(""),
+      { commit: true },
+    );
+
+    expect(second.status).toBe(422);
+    expect(second.report!.committed).toBe(false);
+    expect(second.report!.issues).toHaveLength(1);
+    expect(second.report!.issues[0]).toMatchObject({ row: 2, column: "option1_value" });
+    expect(second.report!.issues[0]!.message).toContain('"Size" would have 55 values');
+
+    // Nothing was written: still 50 values and 50 variants.
+    const values = await admin<{ count: string }[]>`
+      SELECT count(*)::int AS count FROM product_option_values WHERE tenant_id = ${tenant}`;
+    expect(Number(values[0]!.count)).toBe(50);
+    const variants = await admin<{ count: string }[]>`
+      SELECT count(*)::int AS count FROM product_variants
+      WHERE tenant_id = ${tenant} AND deleted_at IS NULL`;
+    expect(Number(variants[0]!.count)).toBe(50);
+  });
+
+  it("refuses a file that would push a product past 200 variants", async () => {
+    const tenant = await makeTenant();
+    sessionToken = await makeSession(tenant, "owner");
+
+    const header =
+      "handle,title,option1_name,option1_value,option2_name,option2_value,sku,price,weight_grams\r\n";
+    const row = (size: number, colour: number): string =>
+      `cap-vars,Cap Vars,Size,S${size},Colour,C${colour},CV-${size}-${colour},10,100\r\n`;
+
+    // 50 sizes × 4 colours = 200 variants, and neither axis is over 50.
+    const grid: string[] = [];
+    for (let s = 0; s < 50; s++) for (let c = 0; c < 4; c++) grid.push(row(s, c));
+
+    const first = await importCsv(header + grid.join(""), { commit: true });
+    expect(first.status).toBe(200);
+    expect(first.report!.created).toBe(1);
+
+    // A fifth colour: 50 more rows, and 250 variants on the product.
+    const more = Array.from({ length: 50 }, (_, s) => row(s, 4)).join("");
+    const second = await importCsv(header + more, { commit: true });
+
+    expect(second.status).toBe(422);
+    expect(second.report!.committed).toBe(false);
+    expect(second.report!.issues[0]).toMatchObject({ row: 2, column: "handle" });
+    expect(second.report!.issues[0]!.message).toContain(
+      '"cap-vars" would have 250 variants — 50 from this file and 200 already on the product',
+    );
+
+    const variants = await admin<{ count: string }[]>`
+      SELECT count(*)::int AS count FROM product_variants
+      WHERE tenant_id = ${tenant} AND deleted_at IS NULL`;
+    expect(Number(variants[0]!.count)).toBe(200);
   });
 });
 

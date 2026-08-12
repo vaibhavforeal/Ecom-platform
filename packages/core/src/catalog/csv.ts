@@ -88,9 +88,16 @@ const MAX_TAX_RATE_BPS = 10_000;
  * variants at 200 and an option axis's values at 50 — so an import that
  * skipped these would create a product the merchant can then never save
  * from the console again, with nothing on screen explaining why.
+ *
+ * Exported because ONE FILE is not the unit these have to be enforced
+ * on. What this module can see is what the file says; the product that
+ * ends up in the column is the file merged over what is already stored,
+ * and `bulk.ts` re-checks both against the merged result. Fifty option
+ * values in one file and five more in the next is otherwise fifty-five
+ * on the product, with each import individually under the cap.
  */
-const MAX_VARIANTS_PER_PRODUCT = 200;
-const MAX_OPTION_VALUES = 50;
+export const MAX_VARIANTS_PER_PRODUCT = 200;
+export const MAX_OPTION_VALUES = 50;
 
 // ───────────────────────────────────────────────────────────────
 // Columns
@@ -721,6 +728,10 @@ export function parseCatalogCsv(records: string[][]): ParsedCatalogCsv {
         message: `No usable variant rows for "${draft.handle}".`,
       });
     }
+    // Only what THIS FILE says. `bulk.ts` re-checks the merged product,
+    // which is the number that actually reaches the column; this one is
+    // here so the common case is refused before a transaction opens and
+    // with a message about the handle column.
     if (draft.variants.length > MAX_VARIANTS_PER_PRODUCT) {
       issues.push({
         row: draft.row,
@@ -940,6 +951,9 @@ function finaliseAxisNames(
  * writer that does not go through it. Counted from the rows rather than
  * from a declared list because the CSV has no way to declare one — an
  * axis's values are whatever its variants use.
+ *
+ * As with the variant count above, this bounds ONE FILE. `bulk.ts`
+ * bounds the axis that results from merging it over the stored one.
  */
 function countOptionValues(draft: CsvProductDraft, issues: CsvIssue[]): void {
   (draft.optionNames ?? []).forEach((name, i) => {
@@ -1055,7 +1069,20 @@ function readVariant(
   }
   if (has("low_stock_at")) draft.lowStockAt = readLowStock(cell("low_stock_at") ?? "", report);
   if (has("variant_active")) {
-    draft.isActive = readBoolean(cell("variant_active") ?? "", "variant_active", report) ?? true;
+    /**
+     * Left UNDEFINED for a blank cell, which is the same rule every
+     * product column follows: a blank cell states nothing, and the
+     * stored value survives in `mergeVariant`.
+     *
+     * `?? true` here — which is what this line used to say — made a
+     * blank cell mean "on sale". A variant switched off in the console
+     * would then be put back on sale by a hand-built file that merely
+     * carried the column, and nothing in the dry-run report would say
+     * so: the report holds counts and per-row issues, not a field-level
+     * diff. Blank meaning "cleared" is harmless for `barcode`; here
+     * "cleared" would mean "buyable".
+     */
+    draft.isActive = readBoolean(cell("variant_active") ?? "", "variant_active", report);
   }
 
   return draft;

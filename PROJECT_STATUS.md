@@ -106,8 +106,8 @@ pnpm test:integration     42 tests          (db isolation 20, catalog queries 22
 pnpm lint                clean
 pnpm typecheck           6/6 packages
 pnpm build               2/2 Next apps
-pnpm test                316 unit tests     (core 272, integrations 44)
-pnpm test:integration    124 tests          (console 76, core 22, db 20, worker 6)
+pnpm test                317 unit tests     (core 273, integrations 44)
+pnpm test:integration    127 tests          (console 79, core 22, db 20, worker 6)
 ```
 
 The Postgres volume survived the restart: both demo tenants (`acme`, `globex`) and
@@ -277,7 +277,20 @@ If the database volume survived, the two demo tenants are still seeded. If not:
   single cell: 200 variants per product and 50 values per option axis.
   Miss those and the importer happily creates a product the console's
   own edit form then refuses to save, with nothing on screen explaining
-  why.
+  why. **And the unit those two have to be enforced on is the MERGED
+  product, not the file.** `mergeProduct` appends the stored variants a
+  file does not mention and `mergeAxes` unions its option values onto
+  the stored ones, so a cap checked only against the file is reachable
+  in two imports that are each under it — fifty values, then five more.
+  `bulk.ts` re-checks both after merging; `csv.ts` keeps the file-level
+  check only so the common case is refused before a transaction opens.
+- **A blank cell states NOTHING — including `variant_active`.** Every
+  product column already worked that way, but the variant flag defaulted
+  a blank to `true`, so a file that merely carried the column put a
+  variant the merchant had switched off back on sale, with nothing in
+  the report saying so (`ImportReport` holds counts and per-row issues,
+  not a field-level diff). "Cleared" is harmless for `barcode`; here it
+  meant "buyable".
 
 ---
 

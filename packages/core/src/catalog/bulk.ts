@@ -1,7 +1,15 @@
 import { and, eq, isNull, products, urlSlugs, withTenant } from "@platform/db";
 import type { ProductStatus, Tx } from "@platform/db";
 
-import { MAX_IMPORT_ROWS, catalogCsvHeader, parseCatalogCsv, productToCsvRows } from "./csv";
+import {
+  MAX_IMPORT_ROWS,
+  MAX_OPTION_AXES,
+  MAX_OPTION_VALUES,
+  MAX_VARIANTS_PER_PRODUCT,
+  catalogCsvHeader,
+  parseCatalogCsv,
+  productToCsvRows,
+} from "./csv";
 import type {
   CsvIssue,
   CsvProductDraft,
@@ -220,6 +228,13 @@ async function applyProduct(
     };
   }
 
+  // Checked here rather than in the parser because this is the product
+  // that would actually be stored. Checked AFTER the no-op branch above,
+  // so a product that is already over a cap is not a reason to refuse a
+  // file that changes nothing about it.
+  const overflow = overflowIssues(draft, merged, retained);
+  if (overflow.length > 0) throw new ImportRejected(overflow);
+
   try {
     const result = existing
       ? await updateProductInTx(tx, ctx, existing.id, merged.input)
@@ -243,6 +258,57 @@ async function applyProduct(
     }
     throw err;
   }
+}
+
+/**
+ * The two whole-product caps, applied to the MERGED result.
+ *
+ * `csv.ts` bounds what one file says, and that is not the same number.
+ * `mergeProduct` appends every stored variant the file does not mention
+ * and `mergeAxes` unions the file's option values onto the stored ones,
+ * so a cap enforced only on the file is reachable in two imports:
+ * fifty option values in one file, five more in the next, each
+ * individually under the cap and fifty-five on the product afterwards.
+ *
+ * What that costs is not abstract. `productPayloadSchema` caps variants
+ * at 200 and an axis's values at 50, and the console's edit form parses
+ * a product back through it — so the merchant opens a product they
+ * never touched, presses Save, and gets "Array must contain at most 50
+ * element(s)" with no way to act on it.
+ *
+ * The message names the retained count, because otherwise a five-row
+ * file being refused for having too many variants is inexplicable.
+ */
+function overflowIssues(draft: CsvProductDraft, merged: Merged, retained: number): CsvIssue[] {
+  const issues: CsvIssue[] = [];
+  const total = merged.input.variants.length;
+
+  if (total > MAX_VARIANTS_PER_PRODUCT) {
+    issues.push({
+      row: draft.row,
+      column: "handle",
+      message:
+        `"${draft.handle}" would have ${total} variants — ${draft.variants.length} from this ` +
+        `file and ${retained} already on the product that the file does not mention, which ` +
+        `are kept — and a product can have at most ${MAX_VARIANTS_PER_PRODUCT}.`,
+    });
+  }
+
+  merged.input.axes.forEach((axis, i) => {
+    if (axis.values.length <= MAX_OPTION_VALUES) return;
+    issues.push({
+      row: draft.row,
+      // Past the third axis there is no column to point at; the write
+      // layer will be rejecting the axis count anyway.
+      column: i < MAX_OPTION_AXES ? `option${i + 1}_value` : null,
+      message:
+        `"${axis.name}" would have ${axis.values.length} values — this file adds to the ones ` +
+        `already on the product, which are kept — and an option can have at most ` +
+        `${MAX_OPTION_VALUES}.`,
+    });
+  });
+
+  return issues;
 }
 
 /**

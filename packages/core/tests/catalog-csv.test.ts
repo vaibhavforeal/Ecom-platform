@@ -265,6 +265,21 @@ describe("what a cell may say", () => {
     expect(issueAt(parse(withCell("variant_active", "maybe")).issues, 2, "variant_active")).toBeDefined();
   });
 
+  it("leaves variant_active UNDEFINED when the cell is blank, so a switched-off variant stays off", () => {
+    // The column is present and the cell is empty. If this came back
+    // `true`, `mergeVariant` would take it as a concrete instruction and
+    // never consult the stored value — putting a variant the merchant
+    // deactivated in the console back on sale, with nothing in the
+    // report saying so. Blank states nothing, exactly as it does for
+    // every product column.
+    const { products, issues } = parse(withCell("variant_active", ""));
+    expect(issues).toEqual([]);
+    expect(products[0]!.variants[0]!.isActive).toBeUndefined();
+
+    // …and a populated cell still states something.
+    expect(parse(withCell("variant_active", "false")).products[0]!.variants[0]!.isActive).toBe(false);
+  });
+
   it("distinguishes a column that is absent from one that is blank", () => {
     // Present and blank clears the field; absent leaves it alone. That
     // difference is what stops a five-column CSV wiping every barcode.
