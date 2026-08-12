@@ -1,3 +1,5 @@
+import { isSearchIndexable } from "@platform/core";
+
 import { getOrigin } from "../../lib/urls";
 import { getTenant } from "../../lib/tenant";
 
@@ -28,7 +30,7 @@ export async function GET(): Promise<Response> {
   const tenant = await getTenant();
 
   const body =
-    !tenant || tenant.status !== "active"
+    !tenant || !isSearchIndexable(tenant)
       ? ["User-agent: *", "Disallow: /"].join("\n")
       : [
           "User-agent: *",
