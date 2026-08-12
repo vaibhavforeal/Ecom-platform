@@ -24,3 +24,6 @@ Thumbs.db
 infra/docker/data/
 infra/caddy/data/
 infra/caddy/config/
+
+# SDD workspace — git-ignored scratch for subagent-driven development.
+.superpowers/
