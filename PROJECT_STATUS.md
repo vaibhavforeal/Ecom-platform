@@ -28,7 +28,7 @@ Working notes for picking this up after a break. Architecture lives in
 | Media pipeline | ✅ Upload endpoint + worker job — validate, dedupe, AVIF/WebP/JPEG ladder |
 | HTML sanitiser | ✅ Allowlist, applied on write; the PDP now renders rich descriptions |
 | Console catalog CRUD | ✅ Products, variants, options, media attach, categories, collections, slug history |
-| Bulk CSV import/export | ⬜ Not started |
+| Bulk CSV import/export | ✅ One row per variant, dry-run by default, whole file in one transaction, export is the exact inverse |
 
 ### Verified live on 2026-08-01
 
@@ -98,6 +98,16 @@ pnpm typecheck           6/6 packages
 pnpm build               2/2 Next apps      (this had NEVER passed — see traps)
 pnpm test                148 unit tests     (core 135, integrations 13)
 pnpm test:integration     42 tests          (db isolation 20, catalog queries 22)
+```
+
+### Re-verified 2026-08-12 (after bulk CSV, full, all green)
+
+```
+pnpm lint                clean
+pnpm typecheck           6/6 packages
+pnpm build               2/2 Next apps
+pnpm test                314 unit tests     (core 270, integrations 44)
+pnpm test:integration    124 tests          (console 76, core 22, db 20, worker 6)
 ```
 
 The Postgres volume survived the restart: both demo tenants (`acme`, `globex`) and
@@ -237,6 +247,31 @@ If the database volume survived, the two demo tenants are still seeded. If not:
   orders listings by `desc(published_at)` and PostgreSQL sorts NULLs
   FIRST under DESC, so an active product without one pins itself to the
   top of every page.
+- **`slugify` FALLS BACK rather than failing.** `slugify("!!!")` is
+  `"item"`, and `{ fallback: "" }` does not change that — the function
+  ends `slug || opts.fallback || "item"`, so an empty fallback is
+  falsy. A CSV importer that trusted it would turn every
+  punctuation-only handle into one product living at `/item`. Test
+  sluggability with `/[\p{L}\p{N}]/u` *before* calling it.
+- **`String.prototype.trim()` removes U+FEFF.** ECMAScript counts the
+  BOM as WhiteSpace, so a BOM left on the first header name is silently
+  fixed by any `.trim()` downstream — which makes it very easy to write
+  a BOM test that passes with the BOM handling deleted. `csv.ts` strips
+  it in the reader and the test asserts against the READER, not against
+  the parsed column names.
+- **`Response.text()` strips a leading BOM** (it is a spec "UTF-8
+  decode"). Asserting that the CSV export writes one has to be done on
+  `arrayBuffer()` bytes, or the assertion is vacuous.
+- **A CSV cell beginning `=`, `+`, `-` or `@` is a FORMULA to Excel**,
+  and CSV quoting does not stop it — the quotes are syntax the
+  spreadsheet strips before deciding. The export prefixes an apostrophe
+  and the import strips exactly one, which is a bijection, so the
+  round-trip no-op survives the guard.
+- **Export must be the exact inverse of import, including what it does
+  NOT rebuild.** Deriving a product's option axes from the rows in the
+  file drops any declared axis value no variant sits at (Size S/M/L with
+  only S and M stocked), so a re-imported export would not be a no-op.
+  The importer grows axes and never prunes them.
 
 ---
 

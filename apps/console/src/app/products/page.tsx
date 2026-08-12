@@ -66,7 +66,8 @@ export default async function ProductsPage({ searchParams }: Search) {
   return (
     <main>
       <nav className="crumbs">
-        <Link href="/">Dashboard</Link> · <Link href="/products/taxonomy">Categories</Link>
+        <Link href="/">Dashboard</Link> · <Link href="/products/taxonomy">Categories</Link> ·{" "}
+        <Link href="/products/import">Import and export</Link>
       </nav>
 
       <h1>Products</h1>

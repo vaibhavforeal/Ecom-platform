@@ -5,6 +5,7 @@ import {
   collections,
   desc,
   eq,
+  gt,
   ilike,
   inArray,
   isNull,
@@ -259,130 +260,145 @@ export async function getProductForConsole(
   tenantId: string,
   productId: string,
 ): Promise<ConsoleProduct | null> {
-  return withTenant(tenantId, async (tx) => {
-    const [product] = await tx
-      .select()
-      .from(products)
-      .where(
-        and(
-          eq(products.tenantId, tenantId),
-          eq(products.id, productId),
-          isNull(products.deletedAt),
-        ),
-      )
-      .limit(1);
+  return withTenant(tenantId, (tx) => getProductForConsoleInTx(tx, tenantId, productId));
+}
 
-    if (!product) return null;
+/**
+ * The same read, joining a transaction the caller already owns.
+ *
+ * The CSV importer runs the whole file in one transaction and has to see
+ * a product it wrote three rows ago — a second `withTenant` would open a
+ * separate transaction and read the pre-import state.
+ *
+ * `tx` MUST come from `withTenant(tenantId, …)`.
+ */
+export async function getProductForConsoleInTx(
+  tx: Tx,
+  tenantId: string,
+  productId: string,
+): Promise<ConsoleProduct | null> {
+  const [product] = await tx
+    .select()
+    .from(products)
+    .where(
+      and(
+        eq(products.tenantId, tenantId),
+        eq(products.id, productId),
+        isNull(products.deletedAt),
+      ),
+    )
+    .limit(1);
 
-    const [axisRows, variantRows, mediaRows, categoryRows, collectionRows, slugRows] =
-      await Promise.all([
-        tx
-          .select({
-            name: productOptions.name,
-            position: productOptions.position,
-            value: productOptionValues.value,
-            valuePosition: productOptionValues.position,
-          })
-          .from(productOptions)
-          .leftJoin(productOptionValues, eq(productOptionValues.optionId, productOptions.id))
-          .where(eq(productOptions.productId, productId))
-          .orderBy(asc(productOptions.position), asc(productOptionValues.position)),
+  if (!product) return null;
 
-        tx
-          .select()
-          .from(productVariants)
-          .where(
-            and(eq(productVariants.productId, productId), isNull(productVariants.deletedAt)),
-          )
-          .orderBy(asc(productVariants.position)),
+  const [axisRows, variantRows, mediaRows, categoryRows, collectionRows, slugRows] =
+    await Promise.all([
+      tx
+        .select({
+          name: productOptions.name,
+          position: productOptions.position,
+          value: productOptionValues.value,
+          valuePosition: productOptionValues.position,
+        })
+        .from(productOptions)
+        .leftJoin(productOptionValues, eq(productOptionValues.optionId, productOptions.id))
+        .where(eq(productOptions.productId, productId))
+        .orderBy(asc(productOptions.position), asc(productOptionValues.position)),
 
-        // No `status = 'ready'` filter, unlike the storefront: the
-        // merchant needs to see that an image is still processing or has
-        // failed, not have it silently missing from their own gallery.
-        tx
-          .select({
-            id: media.id,
-            storageKey: media.storageKey,
-            alt: media.alt,
-            status: media.status,
-            width: media.width,
-            height: media.height,
-            processingError: media.processingError,
-          })
-          .from(productMedia)
-          .innerJoin(media, eq(media.id, productMedia.mediaId))
-          .where(and(eq(productMedia.productId, productId), isNull(media.deletedAt)))
-          .orderBy(asc(productMedia.position)),
+      tx
+        .select()
+        .from(productVariants)
+        .where(
+          and(eq(productVariants.productId, productId), isNull(productVariants.deletedAt)),
+        )
+        .orderBy(asc(productVariants.position)),
 
-        tx
-          .select({ id: productCategories.categoryId })
-          .from(productCategories)
-          .where(eq(productCategories.productId, productId))
-          .orderBy(asc(productCategories.position)),
+      // No `status = 'ready'` filter, unlike the storefront: the
+      // merchant needs to see that an image is still processing or has
+      // failed, not have it silently missing from their own gallery.
+      tx
+        .select({
+          id: media.id,
+          storageKey: media.storageKey,
+          alt: media.alt,
+          status: media.status,
+          width: media.width,
+          height: media.height,
+          processingError: media.processingError,
+        })
+        .from(productMedia)
+        .innerJoin(media, eq(media.id, productMedia.mediaId))
+        .where(and(eq(productMedia.productId, productId), isNull(media.deletedAt)))
+        .orderBy(asc(productMedia.position)),
 
-        tx
-          .select({ id: productCollections.collectionId })
-          .from(productCollections)
-          .where(eq(productCollections.productId, productId))
-          .orderBy(asc(productCollections.position)),
+      tx
+        .select({ id: productCategories.categoryId })
+        .from(productCategories)
+        .where(eq(productCategories.productId, productId))
+        .orderBy(asc(productCategories.position)),
 
-        tx
-          .select({ slug: urlSlugs.slug, isCanonical: urlSlugs.isCanonical })
-          .from(urlSlugs)
-          .where(
-            and(
-              eq(urlSlugs.tenantId, tenantId),
-              eq(urlSlugs.entityType, "product"),
-              eq(urlSlugs.entityId, productId),
-            ),
-          )
-          .orderBy(desc(urlSlugs.createdAt)),
-      ]);
+      tx
+        .select({ id: productCollections.collectionId })
+        .from(productCollections)
+        .where(eq(productCollections.productId, productId))
+        .orderBy(asc(productCollections.position)),
 
-    const axes: OptionAxis[] = [];
-    for (const row of axisRows) {
-      let axis = axes.find((a) => a.name === row.name);
-      if (!axis) {
-        axis = { name: row.name, values: [] };
-        axes.push(axis);
-      }
-      if (row.value !== null && !axis.values.includes(row.value)) axis.values.push(row.value);
+      tx
+        .select({ slug: urlSlugs.slug, isCanonical: urlSlugs.isCanonical })
+        .from(urlSlugs)
+        .where(
+          and(
+            eq(urlSlugs.tenantId, tenantId),
+            eq(urlSlugs.entityType, "product"),
+            eq(urlSlugs.entityId, productId),
+          ),
+        )
+        .orderBy(desc(urlSlugs.createdAt)),
+    ]);
+
+  const axes: OptionAxis[] = [];
+  for (const row of axisRows) {
+    let axis = axes.find((a) => a.name === row.name);
+    if (!axis) {
+      axis = { name: row.name, values: [] };
+      axes.push(axis);
     }
+    if (row.value !== null && !axis.values.includes(row.value)) axis.values.push(row.value);
+  }
 
-    return {
-      id: product.id,
-      title: product.title,
-      slug: slugRows.find((s) => s.isCanonical)?.slug ?? null,
-      historicalSlugs: slugRows.filter((s) => !s.isCanonical).map((s) => s.slug),
-      summary: product.summary,
-      description: product.description,
-      status: product.status,
-      productType: product.productType,
-      vendor: product.vendor,
-      tags: Array.isArray(product.tags) ? (product.tags as string[]) : [],
-      hsnCode: product.hsnCode,
-      taxRateBps: product.taxRateBps,
-      seo: (product.seo ?? {}) as Record<string, unknown>,
-      axes,
-      variants: variantRows.map((v) => ({
-        id: v.id,
-        sku: v.sku,
-        barcode: v.barcode,
-        options: (v.options ?? {}) as OptionSelection,
-        pricePaise: v.pricePaise,
-        compareAtPaise: v.compareAtPaise,
-        costPaise: v.costPaise,
-        currency: v.currency,
-        weightGrams: v.weightGrams,
-        lowStockAt: v.lowStockAt,
-        imageMediaId: v.imageMediaId,
-        isActive: v.isActive,
-      })),
-      media: mediaRows,
-      categoryIds: categoryRows.map((r) => r.id),
-      collectionIds: collectionRows.map((r) => r.id),
-    };
-  });
+  return {
+    id: product.id,
+    title: product.title,
+    slug: slugRows.find((s) => s.isCanonical)?.slug ?? null,
+    historicalSlugs: slugRows.filter((s) => !s.isCanonical).map((s) => s.slug),
+    summary: product.summary,
+    description: product.description,
+    status: product.status,
+    productType: product.productType,
+    vendor: product.vendor,
+    tags: Array.isArray(product.tags) ? (product.tags as string[]) : [],
+    hsnCode: product.hsnCode,
+    taxRateBps: product.taxRateBps,
+    seo: (product.seo ?? {}) as Record<string, unknown>,
+    axes,
+    variants: variantRows.map((v) => ({
+      id: v.id,
+      sku: v.sku,
+      barcode: v.barcode,
+      options: (v.options ?? {}) as OptionSelection,
+      pricePaise: v.pricePaise,
+      compareAtPaise: v.compareAtPaise,
+      costPaise: v.costPaise,
+      currency: v.currency,
+      weightGrams: v.weightGrams,
+      lowStockAt: v.lowStockAt,
+      imageMediaId: v.imageMediaId,
+      isActive: v.isActive,
+    })),
+    media: mediaRows,
+    categoryIds: categoryRows.map((r) => r.id),
+    collectionIds: collectionRows.map((r) => r.id),
+  };
 }
 
 export type ConsoleTaxonomyRow = {
@@ -477,6 +493,142 @@ export async function listTaxonomyForConsole(tenantId: string): Promise<{
         productCount: collectionCount.get(c.id) ?? 0,
       })),
     };
+  });
+}
+
+/** A product as the CSV export needs it: no media, no ids, plus the slug. */
+export type ExportProductRow = {
+  id: string;
+  /** Null only for a product with no canonical URL, which cannot be exported. */
+  slug: string | null;
+  title: string;
+  status: ProductStatus;
+  summary: string | null;
+  description: string | null;
+  productType: string | null;
+  vendor: string | null;
+  tags: string[];
+  hsnCode: string | null;
+  taxRateBps: number | null;
+  seo: Record<string, unknown>;
+  axes: OptionAxis[];
+  variants: ConsoleVariant[];
+};
+
+/** How many products one export page pulls. */
+export const EXPORT_PAGE_SIZE = 100;
+
+/**
+ * One page of the whole catalog, for streaming an export.
+ *
+ * KEYSET pagination on `products.id`, not OFFSET. An export of several
+ * thousand products is several round trips, and OFFSET paging over a
+ * table that another request is writing to silently skips rows when a
+ * page boundary shifts — a merchant's export quietly missing products is
+ * exactly the failure a migration path cannot have. Ids are uuidv7, so
+ * ascending id is also creation order.
+ *
+ * Drafts and archived products are INCLUDED. This is the merchant's own
+ * catalog, not a storefront listing, and an export that silently drops
+ * everything unpublished is not a backup.
+ */
+export async function listProductsForExport(
+  tenantId: string,
+  opts: { afterId?: string | null; limit?: number } = {},
+): Promise<ExportProductRow[]> {
+  const limit = Math.min(Math.max(opts.limit ?? EXPORT_PAGE_SIZE, 1), 500);
+
+  return withTenant(tenantId, async (tx) => {
+    const rows = await tx
+      .select()
+      .from(products)
+      .where(
+        and(
+          eq(products.tenantId, tenantId),
+          isNull(products.deletedAt),
+          ...(opts.afterId ? [gt(products.id, opts.afterId)] : []),
+        ),
+      )
+      .orderBy(asc(products.id))
+      .limit(limit);
+
+    const ids = rows.map((r) => r.id);
+    if (ids.length === 0) return [];
+
+    const [axisRows, variantRows, slugs] = await Promise.all([
+      tx
+        .select({
+          productId: productOptions.productId,
+          name: productOptions.name,
+          value: productOptionValues.value,
+        })
+        .from(productOptions)
+        .leftJoin(productOptionValues, eq(productOptionValues.optionId, productOptions.id))
+        .where(inArray(productOptions.productId, ids))
+        .orderBy(asc(productOptions.position), asc(productOptionValues.position)),
+
+      tx
+        .select()
+        .from(productVariants)
+        .where(
+          and(inArray(productVariants.productId, ids), isNull(productVariants.deletedAt)),
+        )
+        .orderBy(asc(productVariants.position)),
+
+      slugsFor(tx, tenantId, ids),
+    ]);
+
+    const axesByProduct = new Map<string, OptionAxis[]>();
+    for (const row of axisRows) {
+      let axes = axesByProduct.get(row.productId);
+      if (!axes) {
+        axes = [];
+        axesByProduct.set(row.productId, axes);
+      }
+      let axis = axes.find((a) => a.name === row.name);
+      if (!axis) {
+        axis = { name: row.name, values: [] };
+        axes.push(axis);
+      }
+      if (row.value !== null && !axis.values.includes(row.value)) axis.values.push(row.value);
+    }
+
+    const variantsByProduct = new Map<string, ConsoleVariant[]>();
+    for (const v of variantRows) {
+      const list = variantsByProduct.get(v.productId) ?? [];
+      list.push({
+        id: v.id,
+        sku: v.sku,
+        barcode: v.barcode,
+        options: (v.options ?? {}) as OptionSelection,
+        pricePaise: v.pricePaise,
+        compareAtPaise: v.compareAtPaise,
+        costPaise: v.costPaise,
+        currency: v.currency,
+        weightGrams: v.weightGrams,
+        lowStockAt: v.lowStockAt,
+        imageMediaId: v.imageMediaId,
+        isActive: v.isActive,
+      });
+      variantsByProduct.set(v.productId, list);
+    }
+
+    return rows.map((product) => ({
+      id: product.id,
+      slug: slugs.get(product.id) ?? null,
+      title: product.title,
+      status: product.status,
+      summary: product.summary,
+      description: product.description,
+      productType: product.productType,
+      vendor: product.vendor,
+      tags: Array.isArray(product.tags) ? (product.tags as string[]) : [],
+      hsnCode: product.hsnCode,
+      taxRateBps: product.taxRateBps,
+      seo: (product.seo ?? {}) as Record<string, unknown>,
+      axes: axesByProduct.get(product.id) ?? [],
+      variants: variantsByProduct.get(product.id) ?? [],
+    }));
   });
 }
 

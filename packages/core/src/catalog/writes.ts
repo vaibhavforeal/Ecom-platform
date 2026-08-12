@@ -30,12 +30,16 @@ import { availableSlug, slugify } from "./slug";
 /**
  * Catalog authoring. SERVER ONLY.
  *
- * Every function here opens its own `withTenant` transaction, so the
- * tenant is enforced by PostgreSQL rather than by each caller
+ * Every exported entry point opens its own `withTenant` transaction, so
+ * the tenant is enforced by PostgreSQL rather than by each caller
  * remembering a WHERE clause — and the tenant id comes from the caller's
  * SESSION, never from the payload. The console route handlers are thin
- * wrappers around these; Task 5's CSV importer will be another, which is
- * why the rules live here and not in a route.
+ * wrappers around these; the CSV importer is another, which is why the
+ * rules live here and not in a route.
+ *
+ * The two `…InTx` variants are the exception, and exist for exactly one
+ * reason: the importer must land a whole file or none of it, so it opens
+ * ONE `withTenant` and drives every product through the same code.
  *
  * Three invariants this file exists to hold:
  *
@@ -685,68 +689,87 @@ export async function createProduct(
   ctx: WriteContext,
   input: ProductWriteInput,
 ): Promise<ProductWriteResult> {
-  return withTenant(ctx.tenantId, async (tx) => {
-    const issues = [
-      ...matrixIssues(input),
-      ...(await skuIssues(tx, ctx.tenantId, null, input.variants)),
-    ];
-    if (issues.length > 0) throw new CatalogValidationError(issues);
+  return withTenant(ctx.tenantId, (tx) => createProductInTx(tx, ctx, input));
+}
 
-    await assertMediaVisible(tx, ctx.tenantId, referencedMediaIds(input));
-    await assertTaxonomyVisible(tx, ctx.tenantId, input.categoryIds, input.collectionIds);
+/**
+ * `createProduct`, but joining a transaction the caller already owns.
+ *
+ * The CSV importer needs the WHOLE file to land or none of it: a failure
+ * on row 300 that leaves rows 1–299 committed is half a catalog, and a
+ * merchant cannot tell which half. So it opens one `withTenant` and
+ * drives every product through these two functions.
+ *
+ * `tx` MUST be a transaction opened by `withTenant` for `ctx.tenantId`.
+ * Nothing here re-establishes the tenant context — RLS is what makes
+ * these queries safe, and it is set by the transaction, not by this
+ * call. Everything outside an importer should use `createProduct`.
+ */
+export async function createProductInTx(
+  tx: Tx,
+  ctx: WriteContext,
+  input: ProductWriteInput,
+): Promise<ProductWriteResult> {
+  const issues = [
+    ...matrixIssues(input),
+    ...(await skuIssues(tx, ctx.tenantId, null, input.variants)),
+  ];
+  if (issues.length > 0) throw new CatalogValidationError(issues);
 
-    const [product] = await tx
-      .insert(products)
-      .values({
-        tenantId: ctx.tenantId,
-        title: input.title,
-        summary: input.summary,
-        description: cleanDescription(input.description),
-        status: input.status,
-        productType: input.productType,
-        vendor: input.vendor,
-        tags: input.tags,
-        hsnCode: input.hsnCode,
-        taxRateBps: input.taxRateBps,
-        seo: cleanSeo(input.seo),
-        // Set on the first activation and never cleared. The storefront
-        // orders listings by it, and PostgreSQL sorts NULLs FIRST under
-        // DESC — so an active product without one jumps to the top of
-        // every page and stays there.
-        publishedAt: input.status === "active" ? new Date() : null,
-        createdByUserId: ctx.actorUserId,
-      })
-      .returning({ id: products.id });
+  await assertMediaVisible(tx, ctx.tenantId, referencedMediaIds(input));
+  await assertTaxonomyVisible(tx, ctx.tenantId, input.categoryIds, input.collectionIds);
 
-    if (!product) throw new Error("products insert returned no row");
+  const [product] = await tx
+    .insert(products)
+    .values({
+      tenantId: ctx.tenantId,
+      title: input.title,
+      summary: input.summary,
+      description: cleanDescription(input.description),
+      status: input.status,
+      productType: input.productType,
+      vendor: input.vendor,
+      tags: input.tags,
+      hsnCode: input.hsnCode,
+      taxRateBps: input.taxRateBps,
+      seo: cleanSeo(input.seo),
+      // Set on the first activation and never cleared. The storefront
+      // orders listings by it, and PostgreSQL sorts NULLs FIRST under
+      // DESC — so an active product without one jumps to the top of
+      // every page and stays there.
+      publishedAt: input.status === "active" ? new Date() : null,
+      createdByUserId: ctx.actorUserId,
+    })
+    .returning({ id: products.id });
 
-    const { slug } = await setCanonicalSlug(
-      tx,
-      ctx.tenantId,
-      "product",
-      product.id,
-      input.slug?.trim() || input.title,
-    );
+  if (!product) throw new Error("products insert returned no row");
 
-    await writeOptions(tx, ctx.tenantId, product.id, input.axes);
-    await writeVariants(tx, ctx.tenantId, product.id, input.variants, ctx.actorUserId, true);
-    await writeMembership(tx, ctx.tenantId, product.id, input.categoryIds, input.collectionIds);
-    await writeGallery(tx, ctx.tenantId, product.id, input.media);
+  const { slug } = await setCanonicalSlug(
+    tx,
+    ctx.tenantId,
+    "product",
+    product.id,
+    input.slug?.trim() || input.title,
+  );
 
-    await recordAudit(tx, ctx.tenantId, {
-      actorType: "staff",
-      actorUserId: ctx.actorUserId,
-      action: "product.created",
-      entityType: "product",
-      entityId: product.id,
-      after: snapshotOf(input, slug),
-      ip: ctx.ip,
-      userAgent: ctx.userAgent,
-      requestId: ctx.requestId,
-    });
+  await writeOptions(tx, ctx.tenantId, product.id, input.axes);
+  await writeVariants(tx, ctx.tenantId, product.id, input.variants, ctx.actorUserId, true);
+  await writeMembership(tx, ctx.tenantId, product.id, input.categoryIds, input.collectionIds);
+  await writeGallery(tx, ctx.tenantId, product.id, input.media);
 
-    return { productId: product.id, slug, previousSlug: null };
+  await recordAudit(tx, ctx.tenantId, {
+    actorType: "staff",
+    actorUserId: ctx.actorUserId,
+    action: "product.created",
+    entityType: "product",
+    entityId: product.id,
+    after: snapshotOf(input, slug),
+    ip: ctx.ip,
+    userAgent: ctx.userAgent,
+    requestId: ctx.requestId,
   });
+
+  return { productId: product.id, slug, previousSlug: null };
 }
 
 export async function updateProduct(
@@ -754,92 +777,100 @@ export async function updateProduct(
   productId: string,
   input: ProductWriteInput,
 ): Promise<ProductWriteResult> {
-  return withTenant(ctx.tenantId, async (tx) => {
-    // RLS is the tenancy check: another merchant's product is invisible
-    // here, so it 404s rather than being editable. The explicit tenant
-    // predicate is belt and braces on top — RLS failing open returns
-    // zero rows rather than erroring, so a second statement of the same
-    // fact is the difference between a silent "not found" and a leak if
-    // anyone ever changes how this runs. The console READ path
-    // (`getProductForConsole`) already writes it; this one should match.
-    const [existing] = await tx
-      .select({
-        id: products.id,
-        title: products.title,
-        status: products.status,
-        publishedAt: products.publishedAt,
-      })
-      .from(products)
-      .where(
-        and(
-          eq(products.tenantId, ctx.tenantId),
-          eq(products.id, productId),
-          isNull(products.deletedAt),
-        ),
-      )
-      .limit(1);
+  return withTenant(ctx.tenantId, (tx) => updateProductInTx(tx, ctx, productId, input));
+}
 
-    if (!existing) throw new ProductNotFoundError(productId);
+/** `updateProduct`, joining the caller's transaction. See `createProductInTx`. */
+export async function updateProductInTx(
+  tx: Tx,
+  ctx: WriteContext,
+  productId: string,
+  input: ProductWriteInput,
+): Promise<ProductWriteResult> {
+  // RLS is the tenancy check: another merchant's product is invisible
+  // here, so it 404s rather than being editable. The explicit tenant
+  // predicate is belt and braces on top — RLS failing open returns
+  // zero rows rather than erroring, so a second statement of the same
+  // fact is the difference between a silent "not found" and a leak if
+  // anyone ever changes how this runs. The console READ path
+  // (`getProductForConsole`) already writes it; this one should match.
+  const [existing] = await tx
+    .select({
+      id: products.id,
+      title: products.title,
+      status: products.status,
+      publishedAt: products.publishedAt,
+    })
+    .from(products)
+    .where(
+      and(
+        eq(products.tenantId, ctx.tenantId),
+        eq(products.id, productId),
+        isNull(products.deletedAt),
+      ),
+    )
+    .limit(1);
 
-    const issues = [
-      ...matrixIssues(input),
-      ...(await skuIssues(tx, ctx.tenantId, productId, input.variants)),
-    ];
-    if (issues.length > 0) throw new CatalogValidationError(issues);
+  if (!existing) throw new ProductNotFoundError(productId);
 
-    await assertMediaVisible(tx, ctx.tenantId, referencedMediaIds(input));
-    await assertTaxonomyVisible(tx, ctx.tenantId, input.categoryIds, input.collectionIds);
+  const issues = [
+    ...matrixIssues(input),
+    ...(await skuIssues(tx, ctx.tenantId, productId, input.variants)),
+  ];
+  if (issues.length > 0) throw new CatalogValidationError(issues);
 
-    const before = await snapshotProduct(tx, ctx.tenantId, productId, existing.title, existing.status);
+  await assertMediaVisible(tx, ctx.tenantId, referencedMediaIds(input));
+  await assertTaxonomyVisible(tx, ctx.tenantId, input.categoryIds, input.collectionIds);
 
-    await tx
-      .update(products)
-      .set({
-        title: input.title,
-        summary: input.summary,
-        description: cleanDescription(input.description),
-        status: input.status,
-        productType: input.productType,
-        vendor: input.vendor,
-        tags: input.tags,
-        hsnCode: input.hsnCode,
-        taxRateBps: input.taxRateBps,
-        seo: cleanSeo(input.seo),
-        publishedAt:
-          existing.publishedAt ?? (input.status === "active" ? new Date() : null),
-        updatedAt: new Date(),
-        updatedByUserId: ctx.actorUserId,
-      })
-      .where(eq(products.id, productId));
+  const before = await snapshotProduct(tx, ctx.tenantId, productId, existing.title, existing.status);
 
-    const { slug, previous } = await setCanonicalSlug(
-      tx,
-      ctx.tenantId,
-      "product",
-      productId,
-      input.slug?.trim() || input.title,
-    );
+  await tx
+    .update(products)
+    .set({
+      title: input.title,
+      summary: input.summary,
+      description: cleanDescription(input.description),
+      status: input.status,
+      productType: input.productType,
+      vendor: input.vendor,
+      tags: input.tags,
+      hsnCode: input.hsnCode,
+      taxRateBps: input.taxRateBps,
+      seo: cleanSeo(input.seo),
+      publishedAt:
+        existing.publishedAt ?? (input.status === "active" ? new Date() : null),
+      updatedAt: new Date(),
+      updatedByUserId: ctx.actorUserId,
+    })
+    .where(eq(products.id, productId));
 
-    await writeOptions(tx, ctx.tenantId, productId, input.axes);
-    await writeVariants(tx, ctx.tenantId, productId, input.variants, ctx.actorUserId, false);
-    await writeMembership(tx, ctx.tenantId, productId, input.categoryIds, input.collectionIds);
-    await writeGallery(tx, ctx.tenantId, productId, input.media);
+  const { slug, previous } = await setCanonicalSlug(
+    tx,
+    ctx.tenantId,
+    "product",
+    productId,
+    input.slug?.trim() || input.title,
+  );
 
-    await recordAudit(tx, ctx.tenantId, {
-      actorType: "staff",
-      actorUserId: ctx.actorUserId,
-      action: previous === null ? "product.updated" : "product.slug_changed",
-      entityType: "product",
-      entityId: productId,
-      before,
-      after: snapshotOf(input, slug),
-      ip: ctx.ip,
-      userAgent: ctx.userAgent,
-      requestId: ctx.requestId,
-    });
+  await writeOptions(tx, ctx.tenantId, productId, input.axes);
+  await writeVariants(tx, ctx.tenantId, productId, input.variants, ctx.actorUserId, false);
+  await writeMembership(tx, ctx.tenantId, productId, input.categoryIds, input.collectionIds);
+  await writeGallery(tx, ctx.tenantId, productId, input.media);
 
-    return { productId, slug, previousSlug: previous };
+  await recordAudit(tx, ctx.tenantId, {
+    actorType: "staff",
+    actorUserId: ctx.actorUserId,
+    action: previous === null ? "product.updated" : "product.slug_changed",
+    entityType: "product",
+    entityId: productId,
+    before,
+    after: snapshotOf(input, slug),
+    ip: ctx.ip,
+    userAgent: ctx.userAgent,
+    requestId: ctx.requestId,
   });
+
+  return { productId, slug, previousSlug: previous };
 }
 
 /*
@@ -1142,14 +1173,21 @@ async function resolveParent(
   return parentId;
 }
 
-/** Sanitised, and collapsed to null when nothing survives. */
-function cleanDescription(raw: string | null): string | null {
+/**
+ * Sanitised, and collapsed to null when nothing survives.
+ *
+ * Exported because the CSV importer has to PREDICT what a write would
+ * store in order to decide whether a row is a change at all — and a
+ * re-implementation of this line in the importer is a re-implementation
+ * that drifts. See `bulk.ts`.
+ */
+export function cleanDescription(raw: string | null): string | null {
   if (raw === null) return null;
   return sanitizeDescriptionHtml(raw) || null;
 }
 
 /** Only the three keys the storefront reads, so no junk accumulates. */
-function cleanSeo(seo: ProductSeoInput): Record<string, unknown> {
+export function cleanSeo(seo: ProductSeoInput): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   if (seo.title?.trim()) out.title = seo.title.trim();
   if (seo.description?.trim()) out.description = seo.description.trim();

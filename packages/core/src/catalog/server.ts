@@ -10,3 +10,4 @@ export * from "./queries";
 export * from "./search";
 export * from "./console-queries";
 export * from "./writes";
+export * from "./bulk";
