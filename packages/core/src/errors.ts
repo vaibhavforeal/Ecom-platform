@@ -9,18 +9,30 @@ export class AppError extends Error {
   readonly status: number;
   readonly code: string;
   readonly publicMessage: string;
+  /**
+   * Structured, client-safe detail — per-field validation issues and
+   * nothing else.
+   *
+   * Separate from `publicMessage` because a form needs to know WHICH
+   * field to highlight, and separate from `message` because that one is
+   * internal and may name ids, users or query text. Anything put here
+   * crosses the wire, so it must be safe to show a merchant.
+   */
+  readonly details?: unknown;
 
   constructor(opts: {
     code: string;
     message: string;
     status?: number;
     publicMessage?: string;
+    details?: unknown;
   }) {
     super(opts.message);
     this.name = new.target.name;
     this.code = opts.code;
     this.status = opts.status ?? 400;
     this.publicMessage = opts.publicMessage ?? opts.message;
+    this.details = opts.details;
   }
 }
 

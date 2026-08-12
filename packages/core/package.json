@@ -20,11 +20,13 @@
   "dependencies": {
     "@platform/db": "workspace:*",
     "ioredis": "^5.4.1",
+    "sanitize-html": "^2.14.0",
     "uuid": "^11.0.3",
     "zod": "^3.24.1"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
+    "@types/sanitize-html": "^2.13.0",
     "dotenv": "^16.4.7",
     "postgres": "^3.4.5",
     "typescript": "^5.7.2",

@@ -5,7 +5,7 @@ import { MAX_UPLOAD_BYTES, mediaStorageKey, sha256, validateUpload } from "@plat
 import { and, desc, eq, isNull, media, withTenant } from "@platform/db";
 import { getStorage } from "@platform/integrations/storage";
 
-import { errorResponse, newRequestId } from "../../../../lib/api";
+import { errorResponse, newRequestId, readBoundedBody } from "../../../../lib/api";
 import { sanitizeOriginal } from "../../../../lib/image";
 import type { SanitizedOriginal } from "../../../../lib/image";
 import { enqueueMediaProcessing } from "../../../../lib/queue";
@@ -47,54 +47,6 @@ function reject(
   requestId: string,
 ): NextResponse {
   return NextResponse.json({ error: { code, message }, requestId }, { status });
-}
-
-/**
- * Read the body, counting as we go, and hang up past the limit.
- *
- * `req.formData()` buffers the whole request with no ceiling — App
- * Router route handlers have no default body limit (`bodySizeLimit` is a
- * Server Actions setting) and Caddy sets no `request_body max_size`. A
- * `Content-Length` pre-check does NOT close that: the header is absent on
- * `Transfer-Encoding: chunked` and on ordinary HTTP/2, and
- * `Number(null ?? "0")` is 0, which passes every comparison. Garbage in
- * the header is `NaN`, which passes too. The only number worth trusting
- * is the one counted off the socket.
- */
-async function readBoundedBody(
-  body: ReadableStream<Uint8Array> | null,
-  limit: number,
-): Promise<Uint8Array<ArrayBuffer> | "too_large" | null> {
-  if (!body) return null;
-
-  const reader = body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (!value) continue;
-
-    total += value.byteLength;
-    if (total > limit) {
-      // Hang up rather than draining bytes already decided against.
-      await reader.cancel().catch(() => undefined);
-      return "too_large";
-    }
-    chunks.push(value);
-  }
-
-  // Joined by hand rather than with Buffer.concat: `BodyInit` excludes
-  // SharedArrayBuffer-backed views, and a Buffer is a view into a shared
-  // pool. Same single copy either way.
-  const joined = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    joined.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return joined;
 }
 
 export async function POST(req: Request): Promise<NextResponse> {

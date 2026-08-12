@@ -1,5 +1,7 @@
+import Link from "next/link";
+
 import { storeSettings, tenants, eq, withPlatform, withTenant } from "@platform/db";
-import { domainsForTenant } from "@platform/core";
+import { can, domainsForTenant } from "@platform/core";
 
 import { requireActor } from "../lib/session";
 
@@ -32,6 +34,17 @@ export default async function DashboardPage() {
       <p className="muted">
         Signed in as {actor.name ?? actor.phoneE164} · {actor.role}
       </p>
+
+      {can(actor, "catalog:read") && (
+        <nav className="toolbar">
+          <Link href="/products" className="chip">
+            Products
+          </Link>
+          <Link href="/products/taxonomy" className="chip">
+            Categories &amp; collections
+          </Link>
+        </nav>
+      )}
 
       <div className="panel">
         <h2 style={{ fontSize: 15, margin: "0 0 12px" }}>Tenant</h2>

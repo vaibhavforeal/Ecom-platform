@@ -36,6 +36,8 @@ Then:
 | http://acme.localhost:3000 | Demo tenant 1 storefront |
 | http://globex.localhost:3000 | Demo tenant 2 storefront |
 | http://localhost:3001/login | Merchant console |
+| http://localhost:3001/products | Catalog — list, create, edit |
+| http://localhost:3001/products/taxonomy | Categories and collections |
 
 `*.localhost` resolves to `127.0.0.1` in Chrome, Firefox and Safari, so both storefronts work with no hosts-file edit. Any unrecognised hostname returns 404 — there is deliberately no default tenant.
 

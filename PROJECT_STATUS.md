@@ -26,7 +26,8 @@ Working notes for picking this up after a break. Architecture lives in
 | Storefront pages | ✅ home, category, collection, PDP, search — verified over HTTP |
 | SEO surface (JSON-LD, sitemap, canonicals, redirects) | ✅ verified over HTTP |
 | Media pipeline | ✅ Upload endpoint + worker job — validate, dedupe, AVIF/WebP/JPEG ladder |
-| Console catalog CRUD | ⬜ Not started — **blocks rich product descriptions**, see below |
+| HTML sanitiser | ✅ Allowlist, applied on write; the PDP now renders rich descriptions |
+| Console catalog CRUD | ✅ Products, variants, options, media attach, categories, collections, slug history |
 | Bulk CSV import/export | ⬜ Not started |
 
 ### Verified live on 2026-08-01
@@ -43,6 +44,25 @@ on this machine holds 3000):
 - `sitemap.xml` lists only that tenant's canonical URLs with `lastmod`.
 - Superseded slug → permanent redirect to the canonical one.
 - Search stems: `?q=shirts` finds "Classic Cotton Shirt"; page is `noindex, follow`.
+
+### Verified live on 2026-08-12 (console CRUD + sanitiser)
+
+Production builds of both apps, console on 3001 and storefront on 3010, a real
+staff session and the seeded `acme` tenant:
+
+- `/products`, `/products/new`, `/products/taxonomy` and `/products/{id}` all
+  render; the list shows the seeded catalog at correct rupee prices, and
+  `?q=` and `?status=` filter it. Unauthenticated → 307 to `/login`.
+- `POST /api/products` → 201; `PUT /api/products/{id}` twice, renaming the slug
+  each time. Both superseded slugs 308-redirect straight to the current
+  canonical one — no chain.
+- A description containing `<script>`, `<img onerror>` and a `javascript:` href
+  came back from the PDP as `<p>Wash <strong>cold</strong>, dry <em>flat</em>.</p>`
+  plus the list, with the hostile link reduced to `<a>bad link</a>` and the
+  legitimate one carrying `rel="nofollow noopener" target="_blank"`.
+- **The redirect and the new description only appeared after the storefront was
+  restarted** — see the cache-purge item under Open items. That is a gap, not a
+  bug in the write path.
 
 **Open question for you:** a `trial` tenant is currently `noindex` in both
 `robots.txt` and page metadata (the latter was already the Phase 0 behaviour).
@@ -189,6 +209,34 @@ If the database volume survived, the two demo tenants are still seeded. If not:
 - **`permanentRedirect()` emits 308, not 301.** Google treats them as
   equivalent, so this is fine — but the domain layer now returns
   `permanent: true` rather than claiming a status code it does not control.
+- **A foreign key does NOT enforce tenancy.** PostgreSQL validates
+  referential integrity as the table owner, with row security bypassed —
+  so a `media_id` belonging to another merchant satisfies the FK and
+  attaches cleanly, with nothing to see in the logs. RLS does not close
+  this. Every id a payload names is checked with an explicit SELECT
+  inside `withTenant` before it is written (`assertVisible` in
+  `catalog/writes.ts`); there is an integration test for it.
+- **`sanitize-html` pulls in `postcss`, which reads `fs`.** It lives in
+  the client-safe `@platform/core/catalog` barrel because the module
+  itself is pure, and webpack tree-shakes it out of both apps' client
+  bundles — verified by grepping `.next/static/chunks`. A client
+  component that imported `sanitizeDescriptionHtml` would fail the build,
+  which is the right failure: nothing needs it in a browser.
+- **`product_variants` has two PARTIAL unique indexes** over
+  `deleted_at IS NULL` — one on SKU, one on the option combination. A
+  save that swaps two variants' SKUs collides mid-UPDATE if the rows are
+  edited in place. The write layer soft-deletes every live variant first
+  and then revives the ones being kept, so the indexes only ever see the
+  set being written.
+- **A variant is identified by its id, and failing that by its SKU.**
+  Without the SKU fallback a payload that omits ids — which is every CSV
+  row — soft-deletes and re-creates the whole variant set: no visible
+  change in the catalog, and every Phase 2 order line left pointing at a
+  dead row.
+- **`publishedAt` must be set on the first activation.** The storefront
+  orders listings by `desc(published_at)` and PostgreSQL sorts NULLs
+  FIRST under DESC, so an active product without one pins itself to the
+  top of every page.
 
 ---
 
@@ -201,7 +249,8 @@ If the database volume survived, the two demo tenants are still seeded. If not:
 | WhatsApp Business verification | Blocks Phase 4 messaging | Weeks |
 | Ekart partner agreement | API docs and credentials are gated behind a Flipkart commercial agreement | Unknown |
 | Version control | The project is **not** a git repository yet | Minutes |
-| HTML sanitiser for product descriptions | The PDP currently renders `description` as **plain text**, deliberately: injecting merchant HTML would be stored XSS against that merchant's own customers on a page that will later collect addresses and payments. Needs an allowlist sanitiser applied on write, in the console — then the PDP can render rich copy | With console CRUD |
+| Storefront cache purge on catalog writes | `apps/storefront/src/lib/catalog.ts` tags every cached read and documents tag purges as "the primary invalidation path" — but nothing purges them, because until now nothing wrote. A merchant who edits a price waits up to the 300s TTL to see it. `revalidateTag` only clears the CALLING app's cache, so the console cannot do it directly: it needs either a shared cache handler or an internal purge endpoint on the storefront (the `/api/internal/verify-domain` shared-secret pattern already exists to copy). Verified live: the redirect and description below only appeared after the storefront was restarted | Half a day |
+| Stock levels | The console can set a variant's SKU, price and low-stock threshold but not its quantity — there is no `stock_movements` table yet. The inventory ledger is Phase 2 (blueprint §4.5), and a mutable counter would be the wrong thing to add early | Phase 2 |
 
 ---
 

@@ -17,4 +17,4 @@ export {
 } from "./rls";
 export { closeConnections } from "./client";
 
-export { sql, eq, and, or, not, isNull, isNotNull, inArray, desc, asc, gt, gte, lt, lte } from "drizzle-orm";
+export { sql, eq, ne, and, or, not, isNull, isNotNull, inArray, ilike, desc, asc, gt, gte, lt, lte } from "drizzle-orm";

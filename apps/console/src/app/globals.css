@@ -114,3 +114,180 @@ code {
   font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   font-size: 13px;
 }
+
+/* ── Catalog console ───────────────────────────────────────── */
+
+/* The product editor is a wide form; 720px squeezes the variant grid
+   into an unreadable column of two-character inputs. */
+main:has(.grid),
+main:has(form .panel) {
+  max-width: 1040px;
+}
+
+select,
+textarea {
+  width: 100%;
+  padding: 10px 12px;
+  background: #0f1318;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  color: var(--text);
+  font-size: 15px;
+  font-family: inherit;
+}
+
+textarea {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 13px;
+  resize: vertical;
+}
+
+select:focus,
+textarea:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.crumbs {
+  font-size: 13px;
+  color: var(--muted);
+  margin-bottom: 18px;
+}
+
+.crumbs a,
+a {
+  color: var(--accent);
+}
+
+.section {
+  font-size: 15px;
+  margin: 0 0 12px;
+}
+
+summary.section {
+  cursor: pointer;
+}
+
+.row {
+  display: flex;
+  gap: 12px;
+  align-items: flex-end;
+}
+
+.toolbar {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-top: 10px;
+}
+
+.chip {
+  display: inline-block;
+  margin-top: 0;
+  padding: 6px 10px;
+  background: #0f1318;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text);
+  font-size: 13px;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.chip:hover {
+  border-color: var(--accent);
+}
+
+.grid {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+
+.grid th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.grid td {
+  padding: 8px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.grid input[type="text"],
+.grid input:not([type]) {
+  padding: 6px 8px;
+  font-size: 13px;
+}
+
+.badge {
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+}
+
+.badge-active {
+  color: #7ee08a;
+  border-color: #2f5c37;
+}
+
+.badge-archived {
+  color: var(--muted);
+}
+
+label.inline {
+  display: block;
+  color: var(--text);
+  font-size: 14px;
+  margin: 6px 0;
+}
+
+label.inline input {
+  width: auto;
+}
+
+fieldset.axis {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin: 0 0 14px;
+}
+
+fieldset.axis legend {
+  font-size: 13px;
+  color: var(--muted);
+  padding: 0 6px;
+}
+
+.thumb {
+  width: 64px;
+  height: 64px;
+  object-fit: cover;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: #0f1318;
+}
+
+.thumb-empty {
+  display: inline-block;
+}
+
+.pagination {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  margin-top: 18px;
+  font-size: 14px;
+}
+
+ul.error {
+  margin: 8px 0 0;
+  padding-left: 18px;
+}
