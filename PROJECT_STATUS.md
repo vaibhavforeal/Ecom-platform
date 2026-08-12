@@ -25,7 +25,7 @@ Working notes for picking this up after a break. Architecture lives in
 | Storefront query layer | ✅ listing, PDP, slug resolution, sitemap — integration tested |
 | Storefront pages | ✅ home, category, collection, PDP, search — verified over HTTP |
 | SEO surface (JSON-LD, sitemap, canonicals, redirects) | ✅ verified over HTTP |
-| Media pipeline | ⬜ Not started |
+| Media pipeline | ✅ Upload endpoint + worker job — validate, dedupe, AVIF/WebP/JPEG ladder |
 | Console catalog CRUD | ⬜ Not started — **blocks rich product descriptions**, see below |
 | Bulk CSV import/export | ⬜ Not started |
 
@@ -170,6 +170,22 @@ If the database volume survived, the two demo tenants are still seeded. If not:
   postgres driver** and fail the build on `net`/`fs`/`perf_hooks`. The barrel is
   split: `@platform/core/catalog` is pure and client-safe,
   `@platform/core/catalog/server` holds everything that touches the database.
+- **ESM evaluates imports before the importing module's body**, so
+  `config({ path: ... })` at the top of `apps/worker/src/index.ts` ran
+  *after* `queues.ts` had already read `REDIS_URL` and built its client.
+  The worker had been connecting to the default `localhost:6379` — a port
+  nothing listens on — and retrying forever, logging `worker.error` with
+  an empty message. Fixed by moving the dotenv call into
+  `apps/worker/src/env.ts` and making `import "./env"` the first import.
+  It only works while it stays first.
+- **A relative `MEDIA_LOCAL_ROOT` resolves against each process's own
+  cwd**, so the console would write uploads to `apps/console/.media` and
+  the worker would look in `apps/worker/.media`. Left unset, both resolve
+  the built-in `<repo-root>/.media`. If it is ever set, set it absolute.
+- **Media derivatives must be recorded at their ACTUAL output size**, not
+  at the width they were planned for. A 100px logo is planned at 320 and
+  rendered at 100 (`withoutEnlargement`); a `320w` descriptor on a 100px
+  file makes the browser pick it for a 320px slot and render it blurry.
 - **`permanentRedirect()` emits 308, not 301.** Google treats them as
   equivalent, so this is fine — but the domain layer now returns
   `permanent: true` rather than claiming a status code it does not control.

@@ -1,16 +1,17 @@
-import { resolve } from "node:path";
+// MUST stay the first import: everything below reads process.env at
+// module scope, and ESM evaluates imports before this file's own body.
+import "./env";
 
 import { Worker } from "bullmq";
-import { config } from "dotenv";
 
 import { closeRedis } from "@platform/core";
 import { closeConnections } from "@platform/db";
 
+import { processMedia } from "./jobs/process-media";
+import type { ProcessMediaJob } from "./jobs/process-media";
 import { verifyDomain } from "./jobs/verify-domain";
 import type { VerifyDomainJob } from "./jobs/verify-domain";
 import { QUEUE_NAMES, closeQueues, connection } from "./queues";
-
-config({ path: resolve(import.meta.dirname, "../../../.env") });
 
 /**
  * Worker entrypoint.
@@ -37,6 +38,23 @@ const workers = [
       return result;
     },
     { connection, concurrency: 5 },
+  ),
+
+  /**
+   * Image processing is CPU-bound, unlike everything else here, which
+   * waits on someone else's API. Five concurrent encodes would pin
+   * every core and starve the I/O-bound queues sharing this process, so
+   * this one runs deliberately narrow.
+   */
+  new Worker<ProcessMediaJob>(
+    QUEUE_NAMES.media,
+    async (job) => {
+      log("job.start", { queue: job.queueName, jobId: job.id, tenantId: job.data.tenantId });
+      const result = await processMedia(job.data);
+      log("job.done", { jobId: job.id, tenantId: job.data.tenantId, ...result });
+      return result;
+    },
+    { connection, concurrency: 2 },
   ),
 ];
 

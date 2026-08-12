@@ -1,5 +1,6 @@
 export * from "./errors";
 export * from "./redis";
+export * from "./queues";
 export * from "./identity/index";
 export * from "./tenancy/index";
 export * from "./audit/index";
