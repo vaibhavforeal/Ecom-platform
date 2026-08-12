@@ -389,6 +389,39 @@ describe("the CSV importer purges once, and only on a commit", () => {
     expect(received).toHaveLength(0);
   });
 
+  it("does not purge a committed file that changed nothing", async () => {
+    const handle = `noop-${randomUUID().slice(0, 6)}`;
+    const rows = file(handle, "No-Op Product");
+
+    // First commit creates it, and purges — that much is the test below.
+    const created = await runCatalogImport({ tenantId, actorUserId: ownerUserId }, rows, {
+      commit: true,
+    });
+    expect(created.created).toBe(1);
+
+    received = [];
+
+    // The same file again. This is the ordinary case, not a contrived
+    // one: a merchant exports their catalog, reads it in a spreadsheet,
+    // changes nothing and uploads it again.
+    const again = await runCatalogImport({ tenantId, actorUserId: ownerUserId }, rows, {
+      commit: true,
+    });
+
+    expect(again.committed).toBe(true);
+    expect({ created: again.created, updated: again.updated, skipped: again.skipped }).toEqual({
+      created: 0,
+      updated: 0,
+      skipped: 1,
+    });
+
+    // Nothing was written — no audit row, no `updated_at` bump — so
+    // there is nothing to invalidate. Purging would empty the tenant's
+    // ENTIRE catalog cache and refill it against Postgres for a file
+    // that did not change a byte.
+    expect(received).toHaveLength(0);
+  });
+
   it("purges once for a committed file, with no per-product tags", async () => {
     received = [];
 

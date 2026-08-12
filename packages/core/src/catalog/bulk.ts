@@ -166,11 +166,22 @@ export async function runCatalogImport(
    * here: purging on a dry run would evict a correct cache and refill it
    * with the same data, for a write that did not happen.
    *
+   * A COMMITTED FILE THAT CHANGED NOTHING is the same case wearing a
+   * different hat, and it is the common one: a merchant exports their
+   * catalog, reads it in a spreadsheet, changes nothing and uploads it
+   * again. `applyProduct` reports every row `skipped` — no audit row,
+   * no `updated_at` bump, genuinely nothing written — so a purge here
+   * would empty the tenant's entire catalog cache and refill it against
+   * Postgres for a file that was a no-op. `errored` cannot reach this
+   * line: any issue rejects the whole file before the transaction runs.
+   *
    * No per-product tags. `catalogTags.all` already covers every entry
    * the file touched, and a thousand-row import would otherwise send a
    * thousand tags at a purge endpoint that caps them at 64.
    */
-  await purgeStorefrontCache(ctx.tenantId, catalogPurgeTags(ctx.tenantId));
+  if (report.created + report.updated > 0) {
+    await purgeStorefrontCache(ctx.tenantId, catalogPurgeTags(ctx.tenantId));
+  }
   return report;
 }
 
@@ -316,8 +327,22 @@ function overflowIssues(draft: CsvProductDraft, merged: Merged, retained: number
     if (axis.values.length <= MAX_OPTION_VALUES) return;
     issues.push({
       row: draft.row,
-      // Past the third axis there is no column to point at; the write
-      // layer will be rejecting the axis count anyway.
+      // Past the third axis there is no column to point at, so the issue
+      // names the row alone.
+      //
+      // NOTHING REJECTS THE AXIS COUNT on this path, and this comment
+      // used to claim otherwise. `validateVariantMatrix` has no
+      // axis-count check at all, and `productPayloadSchema.axes`'s cap
+      // of 3 guards the console's JSON route, not the importer —
+      // `mergeAxes` appends any option name the file introduces onto the
+      // axes already stored.
+      //
+      // A fourth axis is unreachable TODAY by arithmetic rather than by
+      // a guard: `missing_axis` makes every variant name every axis, and
+      // a CSV row expresses at most three option pairs, so a merge that
+      // reaches four axes fails validation on every variant it has. Add
+      // a fourth `optionN_*` column pair, or relax `missing_axis`, and
+      // the count becomes reachable with nothing standing in its way.
       column: i < MAX_OPTION_AXES ? `option${i + 1}_value` : null,
       message:
         `"${axis.name}" would have ${axis.values.length} values — this file adds to the ones ` +
