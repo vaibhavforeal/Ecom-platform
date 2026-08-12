@@ -21,6 +21,7 @@ import type { ProductStatus, SlugEntityType, Tx } from "@platform/db";
 
 import { recordAudit } from "../audit/index";
 import { AppError } from "../errors";
+import { isDescendant } from "./categories";
 import { validateVariantMatrix } from "./options";
 import type { OptionAxis, OptionSelection } from "./options";
 import { sanitizeDescriptionHtml } from "./sanitize-html";
@@ -499,16 +500,34 @@ async function writeVariants(
    * variant in the store: no visible difference in the catalog, and
    * every order line in Phase 2 left pointing at a dead row.
    *
-   * A row is claimed once. Two submitted variants naming the same
-   * existing one would otherwise both update it and lose the second.
+   * TWO PASSES, and the order is the whole point. Resolving in payload
+   * order lets an id-less row claim by SKU a variant that a LATER row
+   * names explicitly by id — so given live V1(sku "A") and V2(sku "B"),
+   * the payload [{sku:"B"}, {id:V2, sku:"C"}] would hand V2 to index 0
+   * and insert "C" fresh, which is the opposite of what was asked. An
+   * explicit id is the stronger statement of intent, so every id-based
+   * claim is settled before any SKU is looked at.
+   *
+   * A row is claimed once either way. Two submitted variants naming the
+   * same existing one would otherwise both update it and lose the first.
    */
+  const targets: (string | null)[] = new Array<string | null>(variants.length).fill(null);
   const claimed = new Set<string>();
-  const targets = variants.map((variant) => {
-    const byId = variant.id && ownIds.has(variant.id) ? variant.id : null;
-    const target = byId ?? bySku.get(variant.sku) ?? null;
-    if (target === null || claimed.has(target)) return null;
-    claimed.add(target);
-    return target;
+
+  variants.forEach((variant, i) => {
+    if (variant.id && ownIds.has(variant.id) && !claimed.has(variant.id)) {
+      claimed.add(variant.id);
+      targets[i] = variant.id;
+    }
+  });
+
+  variants.forEach((variant, i) => {
+    if (targets[i] !== null) return;
+    const bySkuMatch = bySku.get(variant.sku);
+    if (bySkuMatch !== undefined && !claimed.has(bySkuMatch)) {
+      claimed.add(bySkuMatch);
+      targets[i] = bySkuMatch;
+    }
   });
 
   for (const [position, variant] of variants.entries()) {
@@ -547,6 +566,20 @@ async function writeVariants(
   }
 }
 
+/**
+ * Membership is a SET, and is deduplicated here rather than at the
+ * request boundary.
+ *
+ * `product_categories` and `product_collections` are keyed on
+ * (tenant, product, category|collection), so the same id twice is a
+ * duplicate-key violation — which surfaces as an unexplained 500 rather
+ * than as anything a merchant can act on. Deduplicating in the zod
+ * schema would fix the console and leave the hole open for Task 5's CSV
+ * importer, which calls this function directly.
+ *
+ * Silently, not as an error: naming a category twice is redundant, not
+ * wrong, and there is nothing useful to tell someone about it.
+ */
 async function writeMembership(
   tx: Tx,
   tenantId: string,
@@ -554,17 +587,20 @@ async function writeMembership(
   categoryIds: string[],
   collectionIds: string[],
 ): Promise<void> {
+  const categoryIdSet = [...new Set(categoryIds)];
+  const collectionIdSet = [...new Set(collectionIds)];
+
   await tx.delete(productCategories).where(eq(productCategories.productId, productId));
-  if (categoryIds.length > 0) {
+  if (categoryIdSet.length > 0) {
     await tx.insert(productCategories).values(
-      categoryIds.map((categoryId, position) => ({ tenantId, productId, categoryId, position })),
+      categoryIdSet.map((categoryId, position) => ({ tenantId, productId, categoryId, position })),
     );
   }
 
   await tx.delete(productCollections).where(eq(productCollections.productId, productId));
-  if (collectionIds.length > 0) {
+  if (collectionIdSet.length > 0) {
     await tx.insert(productCollections).values(
-      collectionIds.map((collectionId, position) => ({
+      collectionIdSet.map((collectionId, position) => ({
         tenantId,
         productId,
         collectionId,
@@ -581,13 +617,29 @@ async function writeMembership(
  * PICTURE rather than its use on one page — the same photograph on three
  * products should not need the same sentence typed three times. Passing
  * null leaves whatever is already there.
+ *
+ * Deduplicated on `mediaId` for the same reason as `writeMembership`:
+ * `product_media` is keyed on (tenant, product, media), so the same
+ * image twice is a duplicate-key 500. The FIRST occurrence wins, because
+ * it is the one whose position the merchant chose — and position 0 is
+ * the LCP image and the JSON-LD hero.
  */
 async function writeGallery(
   tx: Tx,
   tenantId: string,
   productId: string,
-  items: ProductMediaInput[],
+  input: ProductMediaInput[],
 ): Promise<void> {
+  // Built by hand rather than with a Map: keying a Map keeps the LAST
+  // occurrence, and the first is the one whose position was chosen.
+  const seen = new Set<string>();
+  const items: ProductMediaInput[] = [];
+  for (const item of input) {
+    if (seen.has(item.mediaId)) continue;
+    seen.add(item.mediaId);
+    items.push(item);
+  }
+
   await tx.delete(productMedia).where(eq(productMedia.productId, productId));
 
   if (items.length > 0) {
@@ -703,8 +755,13 @@ export async function updateProduct(
   input: ProductWriteInput,
 ): Promise<ProductWriteResult> {
   return withTenant(ctx.tenantId, async (tx) => {
-    // RLS makes this the tenancy check: another merchant's product is
-    // invisible here, so it 404s rather than being editable.
+    // RLS is the tenancy check: another merchant's product is invisible
+    // here, so it 404s rather than being editable. The explicit tenant
+    // predicate is belt and braces on top — RLS failing open returns
+    // zero rows rather than erroring, so a second statement of the same
+    // fact is the difference between a silent "not found" and a leak if
+    // anyone ever changes how this runs. The console READ path
+    // (`getProductForConsole`) already writes it; this one should match.
     const [existing] = await tx
       .select({
         id: products.id,
@@ -713,7 +770,13 @@ export async function updateProduct(
         publishedAt: products.publishedAt,
       })
       .from(products)
-      .where(and(eq(products.id, productId), isNull(products.deletedAt)))
+      .where(
+        and(
+          eq(products.tenantId, ctx.tenantId),
+          eq(products.id, productId),
+          isNull(products.deletedAt),
+        ),
+      )
       .limit(1);
 
     if (!existing) throw new ProductNotFoundError(productId);
@@ -818,7 +881,7 @@ export async function createCategory(
       .values({
         tenantId: ctx.tenantId,
         title: input.title,
-        description: input.description,
+        description: cleanDescription(input.description),
         parentId: input.parentId ?? null,
         position: input.position,
         isVisible: input.isVisible,
@@ -862,7 +925,18 @@ export async function updateCategory(
     const [existing] = await tx
       .select({ id: categories.id, title: categories.title, isVisible: categories.isVisible })
       .from(categories)
-      .where(and(eq(categories.id, categoryId), isNull(categories.deletedAt)))
+      // The tenant predicate is redundant under RLS and written anyway.
+      // A missing tenant context returns zero rows rather than erroring,
+      // so if anyone ever changes how this runs the failure is a silent
+      // "not found", not a crash. It also lets the planner use the
+      // tenant-leading composite index.
+      .where(
+        and(
+          eq(categories.tenantId, ctx.tenantId),
+          eq(categories.id, categoryId),
+          isNull(categories.deletedAt),
+        ),
+      )
       .limit(1);
 
     if (!existing) throw new TaxonomyNotFoundError("category", categoryId);
@@ -873,7 +947,7 @@ export async function updateCategory(
       .update(categories)
       .set({
         title: input.title,
-        description: input.description,
+        description: cleanDescription(input.description),
         parentId,
         position: input.position,
         isVisible: input.isVisible,
@@ -918,7 +992,7 @@ export async function createCollection(
       .values({
         tenantId: ctx.tenantId,
         title: input.title,
-        description: input.description,
+        description: cleanDescription(input.description),
         position: input.position,
         isVisible: input.isVisible,
         seo: cleanSeo(input.seo),
@@ -961,7 +1035,14 @@ export async function updateCollection(
     const [existing] = await tx
       .select({ id: collections.id, title: collections.title, isVisible: collections.isVisible })
       .from(collections)
-      .where(and(eq(collections.id, collectionId), isNull(collections.deletedAt)))
+      // Redundant under RLS, written anyway — see `updateCategory`.
+      .where(
+        and(
+          eq(collections.tenantId, ctx.tenantId),
+          eq(collections.id, collectionId),
+          isNull(collections.deletedAt),
+        ),
+      )
       .limit(1);
 
     if (!existing) throw new TaxonomyNotFoundError("collection", collectionId);
@@ -970,7 +1051,7 @@ export async function updateCollection(
       .update(collections)
       .set({
         title: input.title,
-        description: input.description,
+        description: cleanDescription(input.description),
         position: input.position,
         isVisible: input.isVisible,
         seo: cleanSeo(input.seo),
@@ -1031,6 +1112,12 @@ async function assertCategoryExists(tx: Tx, tenantId: string, id: string): Promi
  * two-step cycle (A under B, B under A) satisfies every constraint and
  * leaves both subtrees unreachable from any root — invisible in the
  * console and unfixable through the UI.
+ *
+ * The traversal itself is `isDescendant` from `./categories`, which is
+ * pure, already carries unit tests for the cases that matter (including
+ * termination on an existing cycle) and is what the storefront's
+ * navigation uses. This function's job is only to fetch the nodes and
+ * turn its boolean into the right error.
  */
 async function resolveParent(
   tx: Tx,
@@ -1042,28 +1129,14 @@ async function resolveParent(
   await assertCategoryExists(tx, tenantId, parentId);
 
   const all = await tx
-    .select({ id: categories.id, parentId: categories.parentId })
+    .select({ id: categories.id, parentId: categories.parentId, title: categories.title, position: categories.position })
     .from(categories)
     .where(and(eq(categories.tenantId, tenantId), isNull(categories.deletedAt)));
 
-  const childrenOf = new Map<string, string[]>();
-  for (const node of all) {
-    if (!node.parentId) continue;
-    childrenOf.set(node.parentId, [...(childrenOf.get(node.parentId) ?? []), node.id]);
-  }
-
-  const stack = [categoryId];
-  const seen = new Set<string>();
-  while (stack.length > 0) {
-    const id = stack.pop();
-    if (id === undefined || seen.has(id)) continue;
-    seen.add(id);
-    if (id === parentId) {
-      throw new CatalogValidationError([
-        { path: "parentId", message: "A category cannot be filed under itself or its own child." },
-      ]);
-    }
-    stack.push(...(childrenOf.get(id) ?? []));
+  if (isDescendant(all, categoryId, parentId)) {
+    throw new CatalogValidationError([
+      { path: "parentId", message: "A category cannot be filed under itself or its own child." },
+    ]);
   }
 
   return parentId;

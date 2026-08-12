@@ -250,11 +250,46 @@ describe("sanitizeDescriptionHtml — link hrefs", () => {
       "  javascript:alert(1)",
       "java\tscript:alert(1)",
       "java\nscript:alert(1)",
+      // Character references for the leading `j`: decimal, hex, and
+      // zero-padded decimal, which naive entity decoders miss. The
+      // PARSER resolves all three before the sanitiser sees the value,
+      // which is exactly why the scheme is read off a parsed `URL`
+      // rather than off the raw attribute text.
       "&#106;avascript:alert(1)",
-      "javascript:alert(1)",
+      "&#x6A;avascript:alert(1)",
+      "&#0000106;avascript:alert(1)",
+      // A leading control character. Written as an escape rather than
+      // pasted raw: the literal byte is invisible in a diff and in most
+      // editors, which makes it look like a duplicate of the plain
+      // vector above. \u0001 is stripped by URL parsing, not by us.
+      "\u0001javascript:alert(1)",
+      // Percent-encoded `j`. Unlike the entity forms this does NOT
+      // decode to a scheme — `%6A` is a literal path character — so
+      // `new URL()` refuses it for having no scheme at all. The module
+      // docblock names this vector, so it is pinned rather than assumed.
+      "%6Aavascript:alert(1)",
+      // Double-encoded: survives one decode pass, still never a scheme.
+      "%256Aavascript:alert(1)",
+      // `&colon;` resolves to ":" only after the scheme text has been
+      // read, too late to make `javascript` a scheme.
+      "javascript&colon;alert(1)",
     ]) {
       const output = sanitizeDescriptionHtml(`<a href="${href}">x</a>`);
       expect(output, `href=${JSON.stringify(href)}`).not.toMatch(/href=/);
+      expectInert(output);
+    }
+  });
+
+  it("rejects a hostile href repeated as a duplicate attribute", () => {
+    // The parser keeps ONE of a repeated attribute, and the transform
+    // re-reads and re-validates whatever it got, so it does not matter
+    // which — neither ordering can produce a live `javascript:` link.
+    for (const tag of [
+      '<a href="https://example.test" href="javascript:alert(1)">x</a>',
+      '<a href="javascript:alert(1)" href="https://example.test">x</a>',
+    ]) {
+      const output = sanitizeDescriptionHtml(tag);
+      expect(output, tag).not.toContain("javascript:");
       expectInert(output);
     }
   });
