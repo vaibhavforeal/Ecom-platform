@@ -51,6 +51,41 @@ export const runtime = "nodejs";
  */
 const MAX_TAGS = 64;
 
+/**
+ * Expire the tag NOW.
+ *
+ * Next 16 made `revalidateTag`'s second argument mandatory — the
+ * one-argument call this endpoint used on Next 15 is a type error, and
+ * at runtime it logs a deprecation warning. What may be passed is a
+ * named `cacheLife` profile or an inline `{ expire }`, and in
+ * `FileSystemCache.revalidateTag` they land differently in the tag
+ * manifest:
+ *
+ *  - `{ expire: 0 }` → `{ stale: now, expired: now }`.
+ *  - a profile, e.g. `"max"` → `{ stale: now, expired: now + expire }`,
+ *    which for `max` is a year out.
+ *
+ * Both currently purge what this endpoint purges. An `unstable_cache`
+ * entry is a FETCH-kind entry, and `IncrementalCache.get` turns EITHER
+ * `areTagsExpired` or `areTagsStale` into a miss for those, so a
+ * profile-marked tag is refetched too — checked by mutation, not
+ * assumed. `{ expire: 0 }` is chosen anyway, for two reasons:
+ *
+ *  1. It is the documented "immediate expiration" form, and the exact
+ *     behaviour the one-argument call had before 16. A purge means the
+ *     old value is wrong, not that it may be served a while longer.
+ *  2. `FileSystemCache.get` decides APP_PAGE / APP_ROUTE / PAGES entries
+ *     on `areTagsExpired` ALONE — no stale path. Nothing here is one of
+ *     those today (every storefront route is `force-dynamic`), but a
+ *     future-dated `expired` would silently fail to evict one if that
+ *     ever changes.
+ *
+ * `updateTag` is the other immediate-expiry API and cannot be used here:
+ * it throws outside a Server Action, and this is a route handler by
+ * necessity — the caller is another app, over HTTP.
+ */
+const IMMEDIATE = { expire: 0 } as const;
+
 type PurgeRequest = { tenantId: string; tags: string[] };
 
 function parsePurgeRequest(body: unknown): PurgeRequest | null {
@@ -97,7 +132,7 @@ export async function POST(req: Request): Promise<NextResponse> {
     return NextResponse.json({ error: { code: "tag_outside_tenant" } }, { status: 400 });
   }
 
-  for (const tag of parsed.tags) revalidateTag(tag);
+  for (const tag of parsed.tags) revalidateTag(tag, IMMEDIATE);
 
   return NextResponse.json({ purged: parsed.tags.length });
 }

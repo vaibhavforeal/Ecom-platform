@@ -41,10 +41,10 @@ import { installNextDataCache, runRouteHandler } from "./next-cache-harness";
  *
  *  2. **No purge before the one under test.** `STOREFRONT_INTERNAL_ORIGIN`
  *     is deliberately unset here, so building a fixture with
- *     `createProduct` does not fire a purge of its own. That is not
- *     tidiness — on the installed Next, the FIRST purge of a tag is the
- *     only one that has any effect. See the KNOWN DEFECT test at the
- *     bottom, which pins that behaviour, and the task report.
+ *     `createProduct` does not fire a purge of its own. On Next 15.3–15.5
+ *     that was load-bearing — the first purge of a tag was the only one
+ *     with any effect — and on 16 it stays, because a purge fired from a
+ *     fixture would make the "still stale" assertions race.
  */
 
 const TEST_SECRET = "test-internal-secret-9f2b7c1a";
@@ -348,57 +348,61 @@ describe("POST /api/internal/revalidate — refusals leave the cache alone", () 
   });
 });
 
-describe("KNOWN DEFECT — Next ignores every purge of a tag after the first", () => {
+describe("POST /api/internal/revalidate — every purge of a tag counts, not just the first", () => {
   /**
-   * THIS TEST PINS A BUG, NOT A FEATURE. When it starts failing, Next
-   * has been fixed and it should be deleted along with whatever
-   * workaround was put in for it.
+   * THE TEST THIS UPGRADE EXISTS FOR.
    *
-   * `FileSystemCache.revalidateTag` in Next 15.3.0 through at least
-   * 15.5.23 reads:
+   * Next 15.3.0 through 15.5.23 guarded the tag manifest write with
+   * `if (!tagsManifest.has(tag))`, so the manifest kept the timestamp of
+   * the FIRST purge of a tag and never moved it. Staleness was
+   * `revalidatedAt >= entry.lastModified`, and an entry re-cached after
+   * that first purge always has a later `lastModified` — so it was never
+   * evicted again. `catalogTags.all` is on every catalog write, so only
+   * the first write per tenant per storefront process was purged and
+   * every later edit waited out the 300s TTL. That is most of the bug
+   * this endpoint was built to fix, and it is why Task 8 upgraded to
+   * Next 16.
    *
-   *     for (const tag of tags) {
-   *       if (!tagsManifest.has(tag)) tagsManifest.set(tag, Date.now());
-   *     }
+   * Next 16 replaced the manifest values with `{ stale, expired }`
+   * objects and writes them unconditionally
+   * (`FileSystemCache.revalidateTag`, read by `areTagsExpired`). This
+   * test pins the fixed behaviour, so a downgrade to the 15 line — or
+   * anything else that makes a repeat purge a no-op — fails here rather
+   * than in production.
    *
-   * — so the manifest keeps the timestamp of the FIRST purge of a tag
-   * and never moves it. Staleness is `revalidatedAt >= entry.lastModified`,
-   * and an entry re-cached after that first purge always has a later
-   * `lastModified`, so it is never stale again. Next 15.2.9 and earlier
-   * set the timestamp unconditionally; Next 16 rewrote the manifest to
-   * hold `{revalidated, expired}` objects and sets them unconditionally.
-   *
-   * The consequence for this platform is severe and is why Task 6 is not
-   * finished: `catalogTags.all` is on every catalog write, so only the
-   * FIRST catalog write per tenant per storefront process is purged.
-   * Every later edit waits out the 300s TTL — which is most of the bug
-   * the endpoint was built to fix.
+   * Three rounds, not two: "the second purge works" is satisfied by an
+   * off-by-one that alternates, and the manifest entry is only really
+   * unconditional if the third moves it as well.
    */
-  it("purges on the first call and silently does nothing on the second", async () => {
+  it("honours the second and third purge of the same tag, not only the first", async () => {
     const tenantId = await makeTenant();
-    const { productId } = await makeProduct(tenantId, "First Title");
+    const { productId } = await makeProduct(tenantId, "Title 0");
 
-    expect((await getCachedProduct(tenantId, productId))?.title).toBe("First Title");
-    await admin`UPDATE products SET title = 'Second Title' WHERE id = ${productId}`;
+    expect((await getCachedProduct(tenantId, productId))?.title).toBe("Title 0");
 
-    // First purge: works.
-    expect((await purge(tenantId, [`t:${tenantId}:catalog`])).status).toBe(200);
-    expect((await getCachedProduct(tenantId, productId))?.title).toBe("Second Title");
+    for (const round of [1, 2, 3]) {
+      const previous = `Title ${round - 1}`;
+      const next = `Title ${round}`;
 
-    // Next's manifest stores whole milliseconds, so the re-cached entry
-    // has to land in a later millisecond than the purge for this to be
-    // testing the guard rather than a clock tie.
-    await new Promise((resolve) => setTimeout(resolve, 25));
-    expect((await getCachedProduct(tenantId, productId))?.title).toBe("Second Title");
-    await admin`UPDATE products SET title = 'Third Title' WHERE id = ${productId}`;
+      // Next's manifest stores whole milliseconds, so the cached entry
+      // has to land in an earlier millisecond than the purge for this to
+      // be testing the manifest rather than a clock tie.
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      await admin`UPDATE products SET title = ${next} WHERE id = ${productId}`;
 
-    // Second purge: answers 200, and does nothing at all.
-    expect((await purge(tenantId, [`t:${tenantId}:catalog`])).status).toBe(200);
-    await new Promise((resolve) => setTimeout(resolve, 25));
+      // Still serving the old row. Without this the whole loop would
+      // pass against a cache that had quietly stopped caching.
+      expect((await getCachedProduct(tenantId, productId))?.title, `round ${round} stale`).toBe(
+        previous,
+      );
 
-    expect(
-      (await getCachedProduct(tenantId, productId))?.title,
-      "if this is 'Third Title', Next has been fixed — delete this test",
-    ).toBe("Second Title");
+      expect((await purge(tenantId, [`t:${tenantId}:catalog`])).status).toBe(200);
+
+      // Well inside the 300s TTL — the whole test takes milliseconds —
+      // so this can only have changed because the purge was honoured.
+      expect((await getCachedProduct(tenantId, productId))?.title, `round ${round} fresh`).toBe(
+        next,
+      );
+    }
   });
 });

@@ -1,6 +1,6 @@
 # Project Status
 
-**Last updated:** 2026-08-01
+**Last updated:** 2026-08-13
 
 Working notes for picking this up after a break. Architecture lives in
 [`PLATFORM_BLUEPRINT.md`](./PLATFORM_BLUEPRINT.md); day-to-day commands live in
@@ -129,6 +129,29 @@ pnpm build               2/2 Next apps
 pnpm test                321 unit tests     (core 277, integrations 44)
 pnpm test:integration    159 tests          (console 89, core 25, db 24, storefront 15, worker 6)
 ```
+
+### Re-verified 2026-08-13 (after the Next 16 upgrade, full, all green)
+
+```
+pnpm lint                clean
+pnpm typecheck           6/6 packages
+pnpm build               2/2 Next apps      (Next 16.3.0, Turbopack)
+pnpm test                321 unit tests     (core 277, integrations 44)
+pnpm test:integration    167 tests          (console 89, core 25, db 32, storefront 15, worker 6)
+```
+
+Identical counts to the run before it. The only test that changed is the
+`KNOWN DEFECT` characterisation test in
+`apps/storefront/tests/cache-purge.integration.test.ts`: it failed on the
+upgrade, which was the point, and has been replaced by one that asserts
+the second and third purge of a tag are both honoured.
+
+Live pass on production builds (storefront 3010, console 3001): per-host
+catalogs correct, unknown host 404, each tenant's slug 404 on the other's
+host, unauthenticated console 307 → `/login`, and **three consecutive
+console writes each visible on the storefront within a second**. Control:
+a title written straight into Postgres, with no purge, stayed invisible
+until a purge was sent — so the cache was genuinely caching.
 
 `apps/storefront` gained a test surface for the first time, so it now has the
 same `tsconfig.json` / `tsconfig.test.json` split as `apps/console` — tests must
@@ -317,15 +340,44 @@ If the database volume survived, the two demo tenants are still seeded. If not:
   replica needs a load balancer that fans the purge out, or those
   replicas wait out the TTL.
 - **Next 15.3–15.5 ignore every `revalidateTag` on a tag after the
-  first.** `FileSystemCache.revalidateTag` guards its write with
-  `if (!tagsManifest.has(tag))`, so the manifest keeps the timestamp of
-  the first purge forever. Staleness is `revalidatedAt >= entry.lastModified`,
+  first.** `FileSystemCache.revalidateTag` guarded its write with
+  `if (!tagsManifest.has(tag))`, so the manifest kept the timestamp of
+  the first purge forever. Staleness was `revalidatedAt >= entry.lastModified`,
   and an entry re-cached after that first purge always has a later
-  `lastModified` — so it is never evicted again. 15.2.9 and earlier set
-  the timestamp unconditionally; Next 16 rewrote the manifest to hold
-  `{revalidated, expired}` objects and also sets them unconditionally.
-  There is a characterisation test pinning the broken behaviour; when it
-  starts failing, Next has been fixed and it should be deleted.
+  `lastModified` — so it was never evicted again. **Fixed by moving to
+  Next 16** (Task 8), which holds `{stale, expired}` objects and writes
+  them unconditionally. Do not go back to the 15 line; the test that
+  used to pin the defect now pins the fix.
+- **Next 16 made `revalidateTag`'s second argument mandatory, and the
+  obvious value for it is the wrong one.** The deprecation notice for the
+  one-argument form says to pass `"max"` or switch to `updateTag`.
+  `updateTag` throws outside a Server Action, so a route handler cannot
+  use it at all. And a named `cacheLife` profile sets
+  `expired = now + profile.expire` — a year out for `"max"` — where a
+  purge wants `expired = now`. `FileSystemCache.get` decides APP_PAGE /
+  APP_ROUTE / PAGES entries on `areTagsExpired` alone, so on those a
+  profile purge would answer 200 and evict nothing. (An `unstable_cache`
+  entry is evicted by either form, because `IncrementalCache.get` also
+  honours `areTagsStale` for those — checked by mutation, not assumed,
+  so the danger is latent rather than live.) The
+  purge endpoint passes `{ expire: 0 }`, which is the documented
+  immediate-expiration form and what the one-argument call used to do.
+- **`next lint` no longer exists in Next 16**, and `next build` no longer
+  lints. Both apps' `"lint": "next lint"` scripts were removed; the root
+  `pnpm lint` (`eslint .` over the whole workspace) is and always was the
+  thing that actually ran. There is no `eslint-config-next` in this repo
+  and none was added — the shared flat config in `@platform/config` is
+  the lint surface.
+- **Turbopack is the default bundler for `next build` in 16.** Neither
+  app has a `webpack` key in `next.config.ts`, so nothing needed
+  `--webpack`. One behaviour difference: a client component importing
+  `sanitizeDescriptionHtml` used to fail the webpack build on `fs`;
+  under Turbopack it builds and drags `sanitize-html` into the client
+  chunk instead. Nothing does that today — the shipped chunks were
+  grepped — but the guard is now a bundle-size regression rather than a
+  build error. The `fs`/`net`/`tls`/`perf_hooks` failure for
+  `@platform/core/catalog/server` is unchanged and still hard; both
+  directions were probed.
 - **A purge must be issued AFTER the transaction commits.** One issued
   from inside can race a storefront reader into re-caching the
   pre-commit row, and that entry then lives out its full TTL instead of
@@ -374,7 +426,7 @@ If the database volume survived, the two demo tenants are still seeded. If not:
 | WhatsApp Business verification | Blocks Phase 4 messaging | Weeks |
 | Ekart partner agreement | API docs and credentials are gated behind a Flipkart commercial agreement | Unknown |
 | Version control | The project is **not** a git repository yet | Minutes |
-| **Storefront cache purge — BLOCKED on a Next defect** | The purge endpoint is built and wired (`POST /api/internal/revalidate`, called from `packages/core/src/catalog/purge.ts` after every committed write) and it works — **once**. `FileSystemCache.revalidateTag` in Next 15.3.0 → 15.5.23 reads `if (!tagsManifest.has(tag)) tagsManifest.set(tag, Date.now())`, so the manifest keeps the timestamp of the FIRST purge of a tag and never moves it. Since `catalogTags.all` is on every catalog write, only the first write per tenant per storefront process is purged; every later edit waits out the 300s TTL. Pinned by a characterisation test in `apps/storefront/tests/cache-purge.integration.test.ts`. **Needs a decision:** upgrade to Next 16 (fixed there), adopt a custom cache handler, or switch to key-generation cache busting. A downgrade to 15.2.9 (the last unaffected release) would reintroduce CVEs fixed in 15.4.7 | Owner decision |
+| ~~Storefront cache purge — blocked on a Next defect~~ | **Closed by Task 8**: both apps are on Next 16.3.0, where the tag manifest is written unconditionally. Verified live — three consecutive console writes on the same tenant each appeared on the storefront within a second, with the 300s TTL never waited on. The remaining limitation is unchanged and is a deployment fact, not a bug: one purge reaches ONE storefront process, so more than one replica needs a load balancer that fans the purge out, or a shared cache handler | Done |
 | Stock levels | The console can set a variant's SKU, price and low-stock threshold but not its quantity — there is no `stock_movements` table yet. The inventory ledger is Phase 2 (blueprint §4.5), and a mutable counter would be the wrong thing to add early | Phase 2 |
 
 ---
