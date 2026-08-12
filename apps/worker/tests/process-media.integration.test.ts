@@ -243,7 +243,7 @@ describe("processMedia", () => {
       .jpeg()
       .toBuffer();
 
-    const { id, storageKey } = await givenPendingMedia(tenantA, jpeg, {
+    const { id } = await givenPendingMedia(tenantA, jpeg, {
       mimeType: "image/jpeg",
       ext: "jpg",
     });
@@ -279,12 +279,13 @@ describe("processMedia", () => {
       expect(decoded.orientation).toBeUndefined();
     }
 
-    // The original is untouched — stripping happens on the way out, so
-    // the merchant's own file is still whatever they uploaded.
-    const storedOriginal = await storage.get(storageKey);
-    expect((await sharp(storedOriginal).metadata()).exif?.toString("latin1")).toContain(
-      "MERCHANT-HOME-ADDRESS",
-    );
+    // NOTE: this fixture is stored by the test, so it still carries its
+    // EXIF. Real originals do not: the upload route strips them before
+    // anything is written, because the ORIGINAL is what the storefront
+    // links (ProductGrid `src`, PDP hero, JSON-LD `image`) and stripping
+    // only the derivatives would publish the merchant's GPS anyway. That
+    // contract is owned and tested by
+    // apps/console/tests/media-upload.integration.test.ts.
   });
 
   it("still produces a derivative for an original smaller than every breakpoint", async () => {

@@ -1,7 +1,12 @@
 import sharp from "sharp";
 import type { Sharp } from "sharp";
 
-import { derivativeStorageKey, planDerivatives, sha256 } from "@platform/core/media";
+import {
+  MAX_IMAGE_PIXELS,
+  derivativeStorageKey,
+  planDerivatives,
+  sha256,
+} from "@platform/core/media";
 import type { ImageFormat, MediaDerivative } from "@platform/core/media";
 import { eq, media, withTenant } from "@platform/db";
 import { getStorage } from "@platform/integrations/storage";
@@ -20,16 +25,6 @@ import type { TenantJob } from "../queues";
  */
 
 export type ProcessMediaJob = TenantJob<{ mediaId: string }>;
-
-/**
- * Decompression-bomb ceiling.
- *
- * A 4 KB PNG can declare 50000×50000 and expand to gigabytes on decode.
- * Without this the first such upload OOM-kills the worker process —
- * which is shared, so one hostile tenant stops image processing for
- * every merchant on the platform at once.
- */
-const MAX_INPUT_PIXELS = 50_000_000;
 
 const CONTENT_TYPE: Record<ImageFormat, string> = {
   avif: "image/avif",
@@ -89,7 +84,7 @@ export async function processMedia(
     const storage = getStorage();
     const bytes = await storage.get(row.storageKey);
 
-    const metadata = await sharp(bytes, { limitInputPixels: MAX_INPUT_PIXELS }).metadata();
+    const metadata = await sharp(bytes, { limitInputPixels: MAX_IMAGE_PIXELS }).metadata();
     if (!metadata.width || !metadata.height) {
       throw new Error(`Could not read image dimensions from ${row.storageKey}`);
     }
@@ -113,7 +108,7 @@ export async function processMedia(
     const derivatives: MediaDerivative[] = [];
 
     for (const entry of planDerivatives({ width, height })) {
-      const pipeline = sharp(bytes, { limitInputPixels: MAX_INPUT_PIXELS })
+      const pipeline = sharp(bytes, { limitInputPixels: MAX_IMAGE_PIXELS })
         // .rotate() with no argument applies EXIF Orientation and then
         // drops the tag, so the output is upright for viewers that
         // ignore EXIF entirely.

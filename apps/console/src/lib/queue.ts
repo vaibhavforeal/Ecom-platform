@@ -31,3 +31,14 @@ function mediaQueue(): Queue<MediaJobPayload> {
 export async function enqueueMediaProcessing(payload: MediaJobPayload): Promise<void> {
   await mediaQueue().add("process", payload);
 }
+
+/**
+ * Releases the queue's BullMQ handles. The shared `redis()` client is
+ * left alone — BullMQ did not open it and must not close it.
+ */
+export async function closeQueues(): Promise<void> {
+  if (queue) {
+    await queue.close();
+    queue = undefined;
+  }
+}

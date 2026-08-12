@@ -6,21 +6,23 @@ import { and, desc, eq, isNull, media, withTenant } from "@platform/db";
 import { getStorage } from "@platform/integrations/storage";
 
 import { errorResponse, newRequestId } from "../../../../lib/api";
+import { sanitizeOriginal } from "../../../../lib/image";
 import { enqueueMediaProcessing } from "../../../../lib/queue";
 import { getActorOrThrow } from "../../../../lib/session";
 
 export const dynamic = "force-dynamic";
-// Explicit: this route touches the filesystem through the local storage
-// driver, which the edge runtime does not have.
+// Explicit: this route decodes images with sharp and touches the
+// filesystem through the local storage driver. The edge runtime has
+// neither.
 export const runtime = "nodejs";
 
 /**
  * Image upload.
  *
  * Accepts multipart/form-data with a single `file` part, validates it
- * from its own bytes, stores the original and queues derivative
- * generation. Returns as soon as the bytes are safe — encoding eighteen
- * derivatives is the worker's problem.
+ * from its own bytes, strips its metadata, stores it and queues
+ * derivative generation. Returns as soon as the bytes are safe —
+ * encoding eighteen derivatives is the worker's problem.
  *
  * The tenant comes from the SESSION and from nowhere else. A tenantId in
  * the body would let any authenticated merchant write into another
@@ -46,6 +48,54 @@ function reject(
   return NextResponse.json({ error: { code, message }, requestId }, { status });
 }
 
+/**
+ * Read the body, counting as we go, and hang up past the limit.
+ *
+ * `req.formData()` buffers the whole request with no ceiling — App
+ * Router route handlers have no default body limit (`bodySizeLimit` is a
+ * Server Actions setting) and Caddy sets no `request_body max_size`. A
+ * `Content-Length` pre-check does NOT close that: the header is absent on
+ * `Transfer-Encoding: chunked` and on ordinary HTTP/2, and
+ * `Number(null ?? "0")` is 0, which passes every comparison. Garbage in
+ * the header is `NaN`, which passes too. The only number worth trusting
+ * is the one counted off the socket.
+ */
+async function readBoundedBody(
+  body: ReadableStream<Uint8Array> | null,
+  limit: number,
+): Promise<Uint8Array<ArrayBuffer> | "too_large" | null> {
+  if (!body) return null;
+
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value) continue;
+
+    total += value.byteLength;
+    if (total > limit) {
+      // Hang up rather than draining bytes already decided against.
+      await reader.cancel().catch(() => undefined);
+      return "too_large";
+    }
+    chunks.push(value);
+  }
+
+  // Joined by hand rather than with Buffer.concat: `BodyInit` excludes
+  // SharedArrayBuffer-backed views, and a Buffer is a view into a shared
+  // pool. Same single copy either way.
+  const joined = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    joined.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return joined;
+}
+
 export async function POST(req: Request): Promise<NextResponse> {
   const requestId = newRequestId();
   try {
@@ -53,11 +103,8 @@ export async function POST(req: Request): Promise<NextResponse> {
     assertCan(actor, "catalog:write");
     const { tenantId } = actor;
 
-    // Checked before the body is read: `formData()` buffers the whole
-    // request in memory, so an unbounded upload is a memory exhaustion
-    // vector regardless of what validation says afterwards.
-    const declaredLength = Number(req.headers.get("content-length") ?? "0");
-    if (Number.isFinite(declaredLength) && declaredLength > MAX_REQUEST_BYTES) {
+    const raw = await readBoundedBody(req.body, MAX_REQUEST_BYTES);
+    if (raw === "too_large") {
       return reject(
         "file_too_large",
         `Images must be ${MAX_UPLOAD_BYTES} bytes or smaller.`,
@@ -66,7 +113,17 @@ export async function POST(req: Request): Promise<NextResponse> {
       );
     }
 
-    const form = await req.formData().catch(() => null);
+    // Re-parsed from the bounded copy. `Response.formData()` reads the
+    // multipart boundary out of the content type, exactly as the request
+    // would have.
+    const form = raw
+      ? await new Response(raw, {
+          headers: { "content-type": req.headers.get("content-type") ?? "" },
+        })
+          .formData()
+          .catch(() => null)
+      : null;
+
     const file = form?.get("file");
     if (!form || !(file instanceof File)) {
       return reject(
@@ -87,6 +144,9 @@ export async function POST(req: Request): Promise<NextResponse> {
       return reject(validation.code, validation.message, status, requestId);
     }
 
+    // Of the UPLOADED bytes, not the stripped ones. Dedupe has to key on
+    // what the merchant actually sent, or a change to the strip settings
+    // would make every re-upload look like a new asset.
     const checksum = await sha256(bytes);
 
     /**
@@ -114,6 +174,26 @@ export async function POST(req: Request): Promise<NextResponse> {
       });
     }
 
+    // Rotate, then strip, before anything is stored. See lib/image.ts —
+    // the original is what the storefront links, so stripping it only in
+    // the worker's derivatives publishes the merchant's GPS anyway.
+    let original: Buffer;
+    try {
+      original = await sanitizeOriginal(bytes, validation.mimeType);
+    } catch (err) {
+      // Sniffed as an image but will not decode: a bomb, or a truncated
+      // upload. Neither is a server fault.
+      console.warn(
+        JSON.stringify({
+          level: "warn",
+          requestId,
+          event: "media.sanitize_failed",
+          message: err instanceof Error ? err.message : String(err),
+        }),
+      );
+      return reject("invalid_image", "That image could not be read.", 400, requestId);
+    }
+
     const storageKey = mediaStorageKey({ tenantId, checksum, ext: validation.ext });
 
     /**
@@ -123,11 +203,22 @@ export async function POST(req: Request): Promise<NextResponse> {
      * kilobytes and is overwritten by the next upload of the same file,
      * because the key is the checksum.
      */
-    await getStorage().put(storageKey, Buffer.from(bytes), {
+    await getStorage().put(storageKey, original, {
       contentType: validation.mimeType,
       cacheControl: ORIGINAL_CACHE_CONTROL,
     });
 
+    /**
+     * `onConflictDoNothing` on the (tenant, storage_key) unique index.
+     * Two cases land here, and both were a 500 before:
+     *
+     *  · Two uploads of the same file racing — the dedupe SELECT above
+     *    is not atomic with this insert.
+     *  · A SOFT-DELETED row for the same file. The dedupe SELECT filters
+     *    `deleted_at IS NULL`; the unique index has no such predicate.
+     *    So once media deletion exists, re-uploading a previously
+     *    deleted file collides — permanently, for that one file.
+     */
     const inserted = await withTenant(tenantId, async (tx) => {
       const rows = await tx
         .insert(media)
@@ -135,21 +226,73 @@ export async function POST(req: Request): Promise<NextResponse> {
           tenantId,
           storageKey,
           mimeType: validation.mimeType,
-          byteSize: validation.byteSize,
+          // The size of what was STORED. `validation.byteSize` is the
+          // upload's size, which is not what now sits at this key.
+          byteSize: original.length,
           checksum,
           status: "pending",
           createdByUserId: actor.userId,
         })
+        .onConflictDoNothing({ target: [media.tenantId, media.storageKey] })
         .returning({ id: media.id });
       return rows[0] ?? null;
     });
 
-    if (!inserted) {
-      throw new Error(`media insert returned no row for tenant ${tenantId}`);
+    let mediaId: string;
+
+    if (inserted) {
+      mediaId = inserted.id;
+    } else {
+      const claimed = await withTenant(tenantId, async (tx) => {
+        const rows = await tx
+          .select({ id: media.id, status: media.status, deletedAt: media.deletedAt })
+          .from(media)
+          .where(eq(media.storageKey, storageKey))
+          .limit(1);
+        return rows[0] ?? null;
+      });
+
+      if (!claimed) {
+        // The conflicting row is invisible under this tenant's RLS
+        // context, which cannot happen for a tenant-prefixed key.
+        throw new Error(`media insert conflicted on an unreadable row for tenant ${tenantId}`);
+      }
+
+      if (!claimed.deletedAt) {
+        // A concurrent upload of the same file won. Same answer the
+        // dedupe branch would have given a moment earlier.
+        return NextResponse.json({
+          mediaId: claimed.id,
+          status: claimed.status,
+          checksum,
+          deduplicated: true,
+          requestId,
+        });
+      }
+
+      // Soft-deleted, and the merchant has just uploaded the file again.
+      // Undelete and reprocess: plainly what they asked for, and the
+      // alternative is a 500 that never stops happening for that file.
+      await withTenant(tenantId, async (tx) => {
+        await tx
+          .update(media)
+          .set({
+            deletedAt: null,
+            status: "pending",
+            processingError: null,
+            derivatives: [],
+            mimeType: validation.mimeType,
+            byteSize: original.length,
+            checksum,
+            updatedAt: new Date(),
+          })
+          .where(eq(media.id, claimed.id));
+      });
+      mediaId = claimed.id;
     }
 
     try {
-      await enqueueMediaProcessing({ tenantId, mediaId: inserted.id });
+      await enqueueMediaProcessing({ tenantId, mediaId });
     } catch (err) {
       // Redis is down. Without this the row sits `pending` forever and
       // nothing anywhere says so.
@@ -161,13 +304,13 @@ export async function POST(req: Request): Promise<NextResponse> {
             processingError: "Could not queue processing.",
             updatedAt: new Date(),
           })
-          .where(eq(media.id, inserted.id));
+          .where(eq(media.id, mediaId));
       });
       throw err;
     }
 
     return NextResponse.json(
-      { mediaId: inserted.id, status: "pending", checksum, requestId },
+      { mediaId, status: "pending", checksum, requestId },
       { status: 201 },
     );
   } catch (err) {

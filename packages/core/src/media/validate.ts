@@ -31,6 +31,16 @@ export type AllowedImageMimeType = (typeof ALLOWED_IMAGE_MIME_TYPES)[number];
  */
 export const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
 
+/**
+ * Ceiling on decoded pixels, for every `sharp()` call in the platform.
+ *
+ * Bytes on disk say nothing about memory on decode: a 4 KB PNG can
+ * declare 10^8 pixels and expand to gigabytes. Both the upload route and
+ * the worker decode merchant-supplied bytes, so both need this, and one
+ * constant is how they cannot drift apart.
+ */
+export const MAX_IMAGE_PIXELS = 50_000_000;
+
 /** Extension used for the original's storage key, per sniffed type. */
 const EXTENSION_BY_MIME: Record<AllowedImageMimeType, string> = {
   "image/jpeg": "jpg",
