@@ -4,7 +4,7 @@ import { closeConnections } from "@platform/db";
 import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { installNextDataCache, runRouteHandler } from "./next-cache-harness";
+import { installNextDataCache, runDynamicRender, runRouteHandler } from "./next-cache-harness";
 
 /**
  * The purge endpoint, against a real Next data cache and real
@@ -373,12 +373,26 @@ describe("POST /api/internal/revalidate — every purge of a tag counts, not jus
    * Three rounds, not two: "the second purge works" is satisfied by an
    * off-by-one that alternates, and the manifest entry is only really
    * unconditional if the third moves it as well.
+   *
+   * EVERY READ HERE GOES THROUGH `runDynamicRender`, and that is the
+   * difference between testing the property and testing the mechanism.
+   * A bare `await getCachedProduct()` runs OUTSIDE a work store, where
+   * `unstable_cache` recomputes a stale entry synchronously and hands
+   * back fresh data. A real storefront render runs inside one, where a
+   * stale entry is served to the visitor as-is and refreshed in the
+   * background. So a purge that only marks the tag `stale` — which is
+   * what `revalidateTag(tag, "max")` or any `{ expire: n > 0 }` does —
+   * passes a bare-read version of this test and ships the old page.
+   * Measured: with `"max"`, `post` is `Title 0 | Title 1 | Title 2`
+   * across the three rounds, one behind throughout.
    */
   it("honours the second and third purge of the same tag, not only the first", async () => {
     const tenantId = await makeTenant();
     const { productId } = await makeProduct(tenantId, "Title 0");
 
-    expect((await getCachedProduct(tenantId, productId))?.title).toBe("Title 0");
+    const render = () => runDynamicRender(() => getCachedProduct(tenantId, productId));
+
+    expect((await render())?.title).toBe("Title 0");
 
     for (const round of [1, 2, 3]) {
       const previous = `Title ${round - 1}`;
@@ -392,17 +406,28 @@ describe("POST /api/internal/revalidate — every purge of a tag counts, not jus
 
       // Still serving the old row. Without this the whole loop would
       // pass against a cache that had quietly stopped caching.
-      expect((await getCachedProduct(tenantId, productId))?.title, `round ${round} stale`).toBe(
-        previous,
-      );
+      expect((await render())?.title, `round ${round} stale`).toBe(previous);
 
       expect((await purge(tenantId, [`t:${tenantId}:catalog`])).status).toBe(200);
 
-      // Well inside the 300s TTL — the whole test takes milliseconds —
-      // so this can only have changed because the purge was honoured.
-      expect((await getCachedProduct(tenantId, productId))?.title, `round ${round} fresh`).toBe(
-        next,
-      );
+      // The SECOND clock tie, and it is not the same as the one above.
+      // `areTagsExpired` reads `expiredAt <= performance.timeOrigin +
+      // performance.now()`, but `expiredAt` was written from
+      // `Date.now()`. Those are two different clocks, and the
+      // performance clock in a worker here runs up to ~0.7ms BEHIND the
+      // wall clock — measured, and it varies per process. So for under a
+      // millisecond after a purge the entry can still read as
+      // not-expired: `areTagsExpired` came back false 70% of the time
+      // when called in the same instant as the purge. Without this gap
+      // the test fails about 30% of runs, at whichever round loses the
+      // race. See the note in `next-cache-harness.ts`.
+      await new Promise((resolve) => setTimeout(resolve, 25));
+
+      // The next visitor. Well inside the 300s TTL — the whole test
+      // takes milliseconds — so this can only have changed because the
+      // purge was honoured, and honoured as an EXPIRY rather than a
+      // stale mark.
+      expect((await render())?.title, `round ${round} fresh`).toBe(next);
     }
   });
 });

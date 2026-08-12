@@ -349,19 +349,49 @@ If the database volume survived, the two demo tenants are still seeded. If not:
   them unconditionally. Do not go back to the 15 line; the test that
   used to pin the defect now pins the fix.
 - **Next 16 made `revalidateTag`'s second argument mandatory, and the
-  obvious value for it is the wrong one.** The deprecation notice for the
-  one-argument form says to pass `"max"` or switch to `updateTag`.
+  value its own deprecation notice recommends silently breaks the
+  purge.** The notice says to pass `"max"` or switch to `updateTag`.
   `updateTag` throws outside a Server Action, so a route handler cannot
   use it at all. And a named `cacheLife` profile sets
   `expired = now + profile.expire` — a year out for `"max"` — where a
-  purge wants `expired = now`. `FileSystemCache.get` decides APP_PAGE /
-  APP_ROUTE / PAGES entries on `areTagsExpired` alone, so on those a
-  profile purge would answer 200 and evict nothing. (An `unstable_cache`
-  entry is evicted by either form, because `IncrementalCache.get` also
-  honours `areTagsStale` for those — checked by mutation, not assumed,
-  so the danger is latent rather than live.) The
-  purge endpoint passes `{ expire: 0 }`, which is the documented
-  immediate-expiration form and what the one-argument call used to do.
+  purge wants `expired = now`; only `expired` evicts. `areTagsStale`
+  merely sets `isStale`, and on a **dynamic** render `unstable_cache`
+  returns a stale entry to the caller and refreshes it in the
+  background — so a profile purge answers 200 and the next visitor still
+  gets the old page. Measured over three write-then-purge rounds on one
+  tag: `{expire: 0}` → `Title 1 | Title 2 | Title 3`; `"max"` and
+  `{expire: 60}` → `Title 0 | Title 1 | Title 2`, one behind throughout.
+  The purge endpoint passes `{ expire: 0 }`.
+- **Next compares the tag manifest against TWO DIFFERENT CLOCKS.**
+  `FileSystemCache.revalidateTag` writes `expired` from `Date.now()`, and
+  `FileSystemCache.set` writes `lastModified` from `Date.now()` — but
+  `areTagsExpired` tests `expiredAt <= performance.timeOrigin +
+  performance.now()`. `performance.timeOrigin` is fixed when the process
+  starts, so its offset from the wall clock is per-process and drifts;
+  measured in one vitest worker at **-0.699ms to +0.301ms**, and in a
+  plain `node` process at **+0.714ms to +1.259ms**. When it is negative,
+  a purge issued at `Date.now() = T` does not read as expired until the
+  performance clock passes `T`. Called in the same instant as the purge,
+  `areTagsExpired` returned false **70% of the time** (20,000 samples);
+  `areTagsStale`, which reads no clock at all, was never false.
+  **Production is not exposed** — a purge arrives over HTTP from the
+  console and the next visitor is a network round trip behind it, not
+  microseconds — but a same-process test lands inside the window
+  constantly. It made the purge regression test fail 9 runs in 30 at
+  whichever round lost the race, and adding console I/O hid it
+  completely. Tests put a gap between a purge and the read that checks
+  it. Do not "reason" about this one from a single measurement: the sign
+  of the skew differs between processes, which is exactly how it was
+  first misdiagnosed.
+- **A cached read in a test is not a cached read in a render.**
+  `unstable_cache` branches on whether a work store is present. Outside
+  one — a bare `await getCachedProduct(...)` — a stale entry is
+  recomputed SYNCHRONOUSLY and the caller gets fresh data. Inside one,
+  with `isStaticGeneration: false`, the stale entry is returned as-is.
+  So a purge that only marks a tag stale passes a naive test and ships
+  the bug. `tests/next-cache-harness.ts` exposes `runDynamicRender` for
+  this, and any assertion of the form "the visitor now sees the new
+  value" has to go through it.
 - **`next lint` no longer exists in Next 16**, and `next build` no longer
   lints. Both apps' `"lint": "next lint"` scripts were removed; the root
   `pnpm lint` (`eslint .` over the whole workspace) is and always was the

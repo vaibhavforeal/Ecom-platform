@@ -52,33 +52,45 @@ export const runtime = "nodejs";
 const MAX_TAGS = 64;
 
 /**
- * Expire the tag NOW.
+ * Expire the tag NOW. **A named `cacheLife` profile here would break
+ * this endpoint**, so do not "simplify" it to one.
  *
  * Next 16 made `revalidateTag`'s second argument mandatory — the
- * one-argument call this endpoint used on Next 15 is a type error, and
- * at runtime it logs a deprecation warning. What may be passed is a
- * named `cacheLife` profile or an inline `{ expire }`, and in
- * `FileSystemCache.revalidateTag` they land differently in the tag
- * manifest:
+ * one-argument call this endpoint used on Next 15 is a type error now,
+ * and at runtime it logs a deprecation notice recommending `"max"` or
+ * `updateTag`. Both of those recommendations are wrong here.
  *
- *  - `{ expire: 0 }` → `{ stale: now, expired: now }`.
+ * `FileSystemCache.revalidateTag` writes the two forms differently:
+ *
+ *  - `{ expire: 0 }` → `{ stale: now, expired: now }`
  *  - a profile, e.g. `"max"` → `{ stale: now, expired: now + expire }`,
- *    which for `max` is a year out.
+ *    a YEAR out for `max`
  *
- * Both currently purge what this endpoint purges. An `unstable_cache`
- * entry is a FETCH-kind entry, and `IncrementalCache.get` turns EITHER
- * `areTagsExpired` or `areTagsStale` into a miss for those, so a
- * profile-marked tag is refetched too — checked by mutation, not
- * assumed. `{ expire: 0 }` is chosen anyway, for two reasons:
+ * and only `expired` is a purge. `IncrementalCache.get` drops a
+ * FETCH-kind entry — which is what `unstable_cache` stores — solely on
+ * `areTagsExpired`; `areTagsStale` merely sets `isStale`. On a DYNAMIC
+ * render (`isStaticGeneration: false`, which is every render this
+ * storefront does, because every route is `force-dynamic`)
+ * `unstable_cache` hands a stale entry BACK TO THE CALLER unchanged and
+ * refreshes it in the background. So a profile purge answers 200 and the
+ * very next visitor is still served the old page — precisely the symptom
+ * this endpoint exists to remove.
  *
- *  1. It is the documented "immediate expiration" form, and the exact
- *     behaviour the one-argument call had before 16. A purge means the
- *     old value is wrong, not that it may be served a while longer.
- *  2. `FileSystemCache.get` decides APP_PAGE / APP_ROUTE / PAGES entries
- *     on `areTagsExpired` ALONE — no stale path. Nothing here is one of
- *     those today (every storefront route is `force-dynamic`), but a
- *     future-dated `expired` would silently fail to evict one if that
- *     ever changes.
+ * Measured, same tag, three consecutive write-then-purge rounds, reads
+ * inside a work store:
+ *
+ *     { expire: 0 }   →  Title 1 | Title 2 | Title 3   (correct)
+ *     "max"           →  Title 0 | Title 1 | Title 2   (one behind, always)
+ *     { expire: 60 }  →  Title 0 | Title 1 | Title 2   (one behind, always)
+ *
+ * The same reads taken OUTSIDE a work store show all three as correct,
+ * because that branch recomputes a stale entry synchronously. That is a
+ * trap for tests, not a defence — see `runDynamicRender` in
+ * `tests/next-cache-harness.ts`, which the regression test uses.
+ *
+ * `{ expire: 0 }` is not quite what the one-argument call used to do: it
+ * also sets `stale`, where the old form set only `expired`. Strictly
+ * more aggressive, which is the safe direction for a purge.
  *
  * `updateTag` is the other immediate-expiry API and cannot be used here:
  * it throws outside a Server Action, and this is a route handler by
