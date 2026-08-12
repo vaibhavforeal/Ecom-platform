@@ -363,8 +363,9 @@ describe("POST /api/internal/revalidate — refusals leave the cache alone", () 
     const response = await purge(mine.tenantId, [`t:${mine.tenantId}:catalog`]);
     expect(response.status).toBe(200);
 
+    await afterPurgeSettles();
     // Mine cleared…
-    expect((await getCachedProduct(mine.tenantId, mine.productId))?.title).toBe(
+    expect((await renderProduct(mine.tenantId, mine.productId))?.title).toBe(
       "Should Stay Hidden",
     );
     // …and the neighbour's untouched. Tenant-prefixed tags are the only
