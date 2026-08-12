@@ -325,3 +325,100 @@ streams the tenant's catalog as CSV.
 malformed price, a missing required column, a duplicate SKU, and a UTF-8 BOM (Excel
 writes one, and it silently corrupts the first column name). Integration-test the
 round-trip no-op.
+
+---
+
+## Task 6: Storefront cache invalidation via an internal purge endpoint
+
+**Problem.** `apps/storefront/src/lib/catalog.ts` wraps every catalog read in
+`unstable_cache` with tags, and its own comments name tag purges as "the primary
+invalidation path". Nothing purges. That was harmless while the catalog was
+seed-only; now that the console writes, a merchant renames a product and the
+storefront keeps serving the stale description — and the stale redirect — until
+the process restarts or the 300s TTL lapses. Confirmed live.
+
+`revalidateTag` only clears the cache of the app that calls it. The console and
+the storefront are separate Next apps in separate containers, so the console
+cannot fix this from its own process.
+
+**Approach — decided by the owner: an internal purge endpoint on the storefront.**
+
+Copy the existing shared-secret pattern in
+`apps/console/src/app/api/internal/verify-domain/route.ts`. Do not invent a
+second auth scheme; read that route and mirror it.
+
+- New route on the **storefront**: `POST /api/internal/revalidate`, authenticated
+  by the same internal shared secret, taking the tags to purge and calling
+  `revalidateTag` for each.
+- The console calls it after a successful catalog write. **The call happens after
+  the transaction commits, never inside it** — a purge issued mid-transaction can
+  race a reader into re-caching the pre-commit state, which is worse than a stale
+  cache because it survives the TTL.
+- **A failed purge must not fail the merchant's write.** The row is already
+  committed and correct; the cache is stale for at most the TTL. Log it and move
+  on — do not roll back, and do not surface a 500 for a successful save.
+- Purge the tags that actually cover the write: the product, its slugs (old and
+  new on a rename), its categories and collections, and any listing tag the
+  storefront's cache keys use. Read the tag scheme in `lib/catalog.ts` rather
+  than guessing tag names — a tag that does not match purges nothing, silently.
+- The secret must be required. In production an unset secret **throws at
+  startup**, matching the fail-closed rule in Global Constraint 12. An
+  unauthenticated caller must get a 403 before any work.
+
+**Tests.** Integration-test that the endpoint rejects a bad secret and a missing
+secret, and that a valid call purges. Test that a purge failure (endpoint down)
+leaves the write committed and does not surface an error to the caller — that is
+the property most likely to regress. Verify the rename case end to end: write,
+purge, read back the new value without waiting for the TTL.
+
+---
+
+## Task 7: Serve derivatives on the storefront, and make the media checksum index unique
+
+Two independent items, both small, both owner-approved.
+
+**7a — the storefront still links full-size originals.**
+
+`apps/storefront/src/components/ProductGrid.tsx:39` renders
+`src={mediaUrl(product.imageStorageKey)}` with **no `srcSet` at all**, so every
+listing, search and home card downloads the full-size original. The PDP hero
+(`apps/storefront/src/app/[slug]/page.tsx`) and the JSON-LD `image`
+(`apps/storefront/src/lib/seo.ts`) do the same. The derivative pipeline built in
+Task 3 is therefore unused everywhere except where a PDP explicitly opts in.
+
+This is a live cost against the blueprint's §6.2 target — LCP under 2.5s on a
+mid-range Android over 4G.
+
+- Project `derivatives` into the card query alongside `imageStorageKey`. The
+  correlated-subquery and `.as(...)` aliasing traps in Global Constraints 6 both
+  apply here; `packages/core/src/catalog/queries.ts` already documents how the
+  existing hero-image projection avoids them.
+- Render with `srcSetFor` and the `SIZES` hints already in
+  `apps/storefront/src/lib/media.ts`. Use `SIZES.card` for cards and `SIZES.hero`
+  for the PDP hero — a wrong `sizes` is worse than none, because the browser picks
+  from `srcset` before layout using that hint alone.
+- **Keep the `src` fallback.** Media is `pending` until the worker finishes, and
+  `failed` media never gets derivatives; both must still render rather than
+  showing a broken image. `srcSetFor` already returns null when there are no
+  derivatives — an empty `srcset` attribute makes some browsers fetch nothing.
+- Always emit explicit `width`/`height` to prevent CLS.
+
+**Tests.** Assert a product with derivatives emits a `srcset` with the expected
+candidates, and that one with `pending`/`failed` media emits none but still
+renders a working `src`.
+
+**7b — make `media_tenant_checksum_idx` unique.**
+
+`packages/db/src/schema/catalog.ts:133` declares a plain, non-unique index. The
+checksum is what makes re-uploading the same file reuse existing derivatives
+instead of paying to process it again, so duplicate `(tenant_id, checksum)` rows
+are always a bug.
+
+- Change it to a `uniqueIndex` and generate a migration.
+- **The migration must handle pre-existing duplicates**, or it fails on any
+  database that already has them. Decide deliberately: de-duplicate first, or
+  build the index concurrently and report. Do not let it fail silently.
+- The upload route already handles the collision correctly via
+  `onConflictDoNothing` + re-select, so this is integrity hardening rather than a
+  behaviour fix. **Verify the existing dedupe and soft-delete-revive paths still
+  pass** — the unique constraint must not turn a handled case into a 500.
