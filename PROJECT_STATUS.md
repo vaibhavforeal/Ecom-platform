@@ -20,6 +20,7 @@ Working notes for picking this up after a break. Architecture lives in
 
 | Piece | State |
 | :--- | :--- |
+| Per-tenant search indexing | ⚠️ `tenants.search_indexing` (`auto`/`indexed`/`noindex`) + `isSearchIndexable`, read by `robots.txt` and page metadata. **No route and no console screen writes the column** — it is SQL-only until a settings UI exists |
 | Catalog schema + RLS + seed | ✅ 11 tables, policies auto-derived, demo catalog for both tenants |
 | Catalog domain logic (`@platform/core/catalog`) | ✅ slugs, option matrices, money, search, category trees |
 | Storefront query layer | ✅ listing, PDP, slug resolution, sitemap — integration tested |
@@ -29,6 +30,8 @@ Working notes for picking this up after a break. Architecture lives in
 | HTML sanitiser | ✅ Allowlist, applied on write; the PDP now renders rich descriptions |
 | Console catalog CRUD | ✅ Products, variants, options, media attach, categories, collections, slug history |
 | Bulk CSV import/export | ✅ One row per variant, dry-run by default, whole file in one transaction, export is the exact inverse |
+| Storefront cache purge | ✅ Console POSTs the storefront's internal `/api/internal/revalidate` after every committed catalog write, with tenant-prefixed tags; the worker purges too, once a media row goes `ready`. Fail-soft — a failed purge never fails the write. A no-op CSV import does not purge |
+| Next 16 upgrade (both apps) | ✅ 16.3.0 on Turbopack. Forced by Next 15.3–15.5 writing the tag manifest only on a tag's FIRST purge, which made every catalog edit after the first wait out the 300s TTL |
 
 ### Verified live on 2026-08-01
 
@@ -64,10 +67,17 @@ staff session and the seeded `acme` tenant:
   restarted** — see the cache-purge item under Open items. That is a gap, not a
   bug in the write path.
 
-**Open question for you:** a `trial` tenant is currently `noindex` in both
-`robots.txt` and page metadata (the latter was already the Phase 0 behaviour).
-Trial merchants launching a real store probably *do* want to be indexed. Worth
-deciding before anyone onboards.
+**Not an open question — a missing screen.** A `trial` tenant defaults to
+`noindex` in both `robots.txt` and page metadata, and Task 1 already built the
+way out: `tenants.search_indexing` is `auto` | `indexed` | `noindex`, and
+`isSearchIndexable` reads it, so a trial merchant launching a real store can be
+indexed by setting the column to `indexed`. `suspended` and `churned` stay
+`noindex` whatever the column says — that ordering is deliberate and tested.
+
+What is missing is the way to set it: **nothing in the repo writes that
+column.** No route, no console screen, no seed value other than the `auto`
+default. So the setting exists and works, but is reachable only by SQL until a
+tenant-settings UI exists.
 
 ### Last full verification (2026-07-31, all green)
 
@@ -140,11 +150,16 @@ pnpm test                321 unit tests     (core 277, integrations 44)
 pnpm test:integration    167 tests          (console 89, core 25, db 32, storefront 15, worker 6)
 ```
 
-Identical counts to the run before it. The only test that changed is the
+Unit counts are identical to the run before it. Integration went **159 → 167**,
+and the +8 are NOT from the upgrade: they are the `packages/db` suite
+`media-dedupe-migration.test.ts`, added by commit `b940b00` between the two runs
+(db 24 → 32). Every other package's count is unchanged.
+
+The upgrade's own test change was a replacement, not an addition: the
 `KNOWN DEFECT` characterisation test in
-`apps/storefront/tests/cache-purge.integration.test.ts`: it failed on the
-upgrade, which was the point, and has been replaced by one that asserts
-the second and third purge of a tag are both honoured.
+`apps/storefront/tests/cache-purge.integration.test.ts` failed on the upgrade,
+which was the point, and was replaced by one asserting that the second and third
+purge of a tag are both honoured.
 
 Live pass on production builds (storefront 3010, console 3001): per-host
 catalogs correct, unknown host 404, each tenant's slug 404 on the other's
@@ -152,6 +167,33 @@ host, unauthenticated console 307 → `/login`, and **three consecutive
 console writes each visible on the storefront within a second**. Control:
 a title written straight into Postgres, with no purge, stayed invisible
 until a purge was sent — so the cache was genuinely caching.
+
+### Re-verified 2026-08-13 (after the whole-branch review fix wave, full, all green)
+
+```
+pnpm lint                clean
+pnpm typecheck           6/6 packages
+pnpm build               2/2 Next apps      (Next 16.3.0, Turbopack)
+pnpm test                321 unit tests     (core 277, integrations 44)
+pnpm test:integration    174 tests          (console 93, core 25, db 32, storefront 15, worker 9)
+```
+
+Unit counts unchanged; integration **167 → 174**. The +7 are new: console +4
+(a failed-media re-upload retry, the alt returned on a dedupe hit, `alt: null`
+leaving a shared alt alone, and a committed no-op import not purging) and
+worker +3 (the job purges when a row goes `ready`, does not purge when it
+fails, and does not fail when the purge does).
+
+Each fix was probed by reverting it and watching its own test fail, then
+restored: the two storefront purge tests now fail under
+`revalidateTag(tag, "max")` where before the change they passed; the no-op
+purge test fails without the `created + updated > 0` guard; the worker purge
+test fails without the purge call; the failed-media retry test fails against
+the old dedupe SELECT.
+
+**No live HTTP pass was run for this wave** — the gate above is the whole
+of it. The live pass recorded under the Next 16 section still stands for
+the purge path it covers.
 
 `apps/storefront` gained a test surface for the first time, so it now has the
 same `tsconfig.json` / `tsconfig.test.json` split as `apps/console` — tests must
@@ -175,7 +217,7 @@ fails on the inner call.
 ```bash
 pnpm infra:up            # needs Docker Desktop running
 pnpm db:migrate          # re-applies RLS policies idempotently
-pnpm test:integration    # the 17-test isolation suite
+pnpm test:integration    # the 20-test isolation suite, and everything else
 ```
 
 If the database volume survived, the two demo tenants are still seeded. If not:
@@ -437,6 +479,17 @@ If the database volume survived, the two demo tenants are still seeded. If not:
   BYPASSRLS: without it a data-repair step finds nothing, reports
   nothing, and succeeds. That migration asserts the role can bypass RLS
   rather than trusting it.
+- **A source file containing a raw NUL byte is BINARY to git, and its
+  diffs vanish from review.** `resolve.ts` held `const NEGATIVE = "\0none";`
+  written as one literal 0x00 byte rather than the escape. `file`
+  reported `data`, and every diff of that file rendered as
+  `Bin 6235 -> 6333 bytes` — no lines, nothing to review, and `git merge`
+  treats it as an unmergeable binary conflict. It was the module deciding
+  which merchant's catalog a hostname serves. `"\u0000none"` is the same
+  runtime value (`length === 5`, `charCodeAt(0) === 0`) in ASCII source
+  bytes. Git decides this per blob and caches nothing: the diff against
+  the last binary revision is still binary, and everything after it is
+  text.
 - **A blank cell states NOTHING — including `variant_active`.** Every
   product column already worked that way, but the variant flag defaulted
   a blank to `true`, so a file that merely carried the column put a
@@ -455,7 +508,6 @@ If the database volume survived, the two demo tenants are still seeded. If not:
 | TRAI DLT registration (SMS) | Carriers silently drop unregistered traffic; blocks Phase 4 | Weeks |
 | WhatsApp Business verification | Blocks Phase 4 messaging | Weeks |
 | Ekart partner agreement | API docs and credentials are gated behind a Flipkart commercial agreement | Unknown |
-| Version control | The project is **not** a git repository yet | Minutes |
 | ~~Storefront cache purge — blocked on a Next defect~~ | **Closed by Task 8**: both apps are on Next 16.3.0, where the tag manifest is written unconditionally. Verified live — three consecutive console writes on the same tenant each appeared on the storefront within a second, with the 300s TTL never waited on. The remaining limitation is unchanged and is a deployment fact, not a bug: one purge reaches ONE storefront process, so more than one replica needs a load balancer that fans the purge out, or a shared cache handler | Done |
 | Stock levels | The console can set a variant's SKU, price and low-stock threshold but not its quantity — there is no `stock_movements` table yet. The inventory ledger is Phase 2 (blueprint §4.5), and a mutable counter would be the wrong thing to add early | Phase 2 |
 
