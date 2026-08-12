@@ -176,36 +176,69 @@ function Issues({ issues }: { issues: CsvIssue[] }) {
 }
 
 function Results({ results }: { results: ImportProductResult[] }) {
+  /**
+   * A created product does not always get the URL its handle asked for.
+   * A superseded slug still belongs to whichever product used to live
+   * there — it is the redirect keeping that page's inbound links alive —
+   * so a new product wanting it is given `handle-2` instead. Left
+   * unsaid, the merchant re-imports the same file next week and gets
+   * `handle-3`, and a third product they did not ask for.
+   */
+  const diverted = results.filter((r) => r.slug !== null && r.slug !== r.handle);
+
   return (
-    <table className="grid">
-      <thead>
-        <tr>
-          <th>Row</th>
-          <th>Handle</th>
-          <th>What happens</th>
-          <th style={{ textAlign: "right" }}>Variants in file</th>
-          <th style={{ textAlign: "right" }}>Variants kept</th>
-        </tr>
-      </thead>
-      <tbody>
-        {results.slice(0, 200).map((result) => (
-          <tr key={result.handle}>
-            <td>{result.row}</td>
-            <td>
-              <code>{result.handle}</code>
-            </td>
-            <td>
-              <span className={`badge badge-${result.outcome === "skipped" ? "archived" : "active"}`}>
-                {result.outcome}
-              </span>
-            </td>
-            <td style={{ textAlign: "right" }}>{result.variantsWritten}</td>
-            <td style={{ textAlign: "right" }}>
-              {result.variantsRetained > 0 ? result.variantsRetained : <span className="muted">—</span>}
-            </td>
+    <>
+      {diverted.length > 0 && (
+        <p className="error">
+          {diverted.length === 1 ? "One product" : `${diverted.length} products`} could not take
+          the web address in the handle column — another product used it first. Change the handle
+          to the address shown, or the next import of this file will create another copy.
+        </p>
+      )}
+      <table className="grid">
+        <thead>
+          <tr>
+            <th>Row</th>
+            <th>Handle</th>
+            <th>Web address</th>
+            <th>What happens</th>
+            <th style={{ textAlign: "right" }}>Variants in file</th>
+            <th style={{ textAlign: "right" }}>Variants kept</th>
           </tr>
-        ))}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {results.slice(0, 200).map((result) => (
+            <tr key={result.handle}>
+              <td>{result.row}</td>
+              <td>
+                <code>{result.handle}</code>
+              </td>
+              <td>
+                {result.slug === result.handle ? (
+                  <span className="muted">same</span>
+                ) : (
+                  <code className="error">/{result.slug}</code>
+                )}
+              </td>
+              <td>
+                <span
+                  className={`badge badge-${result.outcome === "skipped" ? "archived" : "active"}`}
+                >
+                  {result.outcome}
+                </span>
+              </td>
+              <td style={{ textAlign: "right" }}>{result.variantsWritten}</td>
+              <td style={{ textAlign: "right" }}>
+                {result.variantsRetained > 0 ? (
+                  result.variantsRetained
+                ) : (
+                  <span className="muted">—</span>
+                )}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </>
   );
 }

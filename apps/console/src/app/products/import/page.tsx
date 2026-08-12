@@ -73,7 +73,9 @@ export default async function ImportPage() {
           </li>
           <li>
             A handle that matches an existing product&rsquo;s address updates it. Anything
-            else creates a new product.
+            else creates a new product. If that address is already taken — including by a
+            product that has since been renamed away from it — the new product gets a
+            numbered one, and the preview says so.
           </li>
           <li>At most {MAX_IMPORT_ROWS} rows per file.</li>
           <li>

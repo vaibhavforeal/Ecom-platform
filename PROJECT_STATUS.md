@@ -106,7 +106,7 @@ pnpm test:integration     42 tests          (db isolation 20, catalog queries 22
 pnpm lint                clean
 pnpm typecheck           6/6 packages
 pnpm build               2/2 Next apps
-pnpm test                314 unit tests     (core 270, integrations 44)
+pnpm test                316 unit tests     (core 272, integrations 44)
 pnpm test:integration    124 tests          (console 76, core 22, db 20, worker 6)
 ```
 
@@ -272,6 +272,12 @@ If the database volume survived, the two demo tenants are still seeded. If not:
   file drops any declared axis value no variant sits at (Size S/M/L with
   only S and M stocked), so a re-imported export would not be a no-op.
   The importer grows axes and never prunes them.
+- **The CSV path bypasses `catalog-input.ts`, so every cap that schema
+  applies is `csv.ts`'s job** — including the two that are not about a
+  single cell: 200 variants per product and 50 values per option axis.
+  Miss those and the importer happily creates a product the console's
+  own edit form then refuses to save, with nothing on screen explaining
+  why.
 
 ---
 

@@ -197,7 +197,10 @@ describe("what a cell may say", () => {
   it.each([
     ["", "A price is required — a blank cell is not ₹0."],
     ["free", 'Cannot read "free" as an amount: it is not a plain number'],
-    ["1299.999", "2"],
+    // The whole clause, not a fragment: `toContain("2")` would have
+    // matched the merchant's own "1299.999" echoed back and passed
+    // against almost any message.
+    ["1299.999", "3 decimal places, but a rupee amount has at most 2"],
     ["-50", "An amount cannot be negative."],
   ])("refuses the price %j rather than defaulting it", (value, fragment) => {
     const { products, issues } = parse(withCell("price", value));
@@ -379,7 +382,16 @@ describe("serialising", () => {
   });
 
   it("writes the header in the documented column order", () => {
-    expect(catalogCsvHeader()).toBe(`${CSV_COLUMNS.join(",")}\r\n`);
+    // Spelled out rather than built from CSV_COLUMNS, which is the thing
+    // under test: a header derived from the constant agrees with any
+    // reordering or rename of it, and this file is a format merchants
+    // will have saved and scripted against.
+    expect(catalogCsvHeader()).toBe(
+      "handle,title,status,summary,description,product_type,vendor,tags,hsn_code," +
+        "tax_rate_percent,seo_title,seo_description,seo_noindex," +
+        "option1_name,option1_value,option2_name,option2_value,option3_name,option3_value," +
+        "sku,barcode,price,compare_at_price,cost,weight_grams,low_stock_at,variant_active\r\n",
+    );
     expect(CSV_COLUMNS).toHaveLength(27);
     expect(REQUIRED_CSV_COLUMNS).toEqual(["handle", "title", "sku", "price", "weight_grams"]);
   });
@@ -545,6 +557,37 @@ describe("caps", () => {
       ["tee", "Tee", "T-1", "10", "20", "100"],
     ]);
     expect(issueAt(issues, 1, "price")?.message).toContain("appears more than once");
+  });
+
+  it("refuses more variants under one handle than the console can then save", () => {
+    // 200 is `productPayloadSchema`'s variant cap. Importing 201 would
+    // create a product the merchant can never save from the console
+    // again — the edit form would reject its own payload, and nothing
+    // would say why. The numbers are spelled out, not read from the cap.
+    const header = ["handle", "title", "sku", "price", "weight_grams"];
+    const row = (i: number): string[] => ["big", "Big", `BIG-${i}`, "10", "100"];
+
+    const ok = parseCatalogCsv([header, ...Array.from({ length: 200 }, (_, i) => row(i))]);
+    expect(ok.issues).toEqual([]);
+    expect(ok.products[0]!.variants).toHaveLength(200);
+
+    const over = parseCatalogCsv([header, ...Array.from({ length: 201 }, (_, i) => row(i))]);
+    expect(issueAt(over.issues, 2, "handle")?.message).toContain(
+      "has 201 variant rows, and a product can have at most 200",
+    );
+  });
+
+  it("refuses more values on one option than the console can then save", () => {
+    const header = ["handle", "title", "option1_name", "option1_value", "sku", "price", "weight_grams"];
+    const row = (i: number): string[] => ["big", "Big", "Size", `V${i}`, `BIG-${i}`, "10", "100"];
+
+    const ok = parseCatalogCsv([header, ...Array.from({ length: 50 }, (_, i) => row(i))]);
+    expect(ok.issues).toEqual([]);
+
+    const over = parseCatalogCsv([header, ...Array.from({ length: 51 }, (_, i) => row(i))]);
+    expect(issueAt(over.issues, 2, "option1_value")?.message).toBe(
+      '"Size" takes 51 different values in this file, and an option can have at most 50.',
+    );
   });
 
   it("caps every merchant-supplied string, because zod does not see this path", () => {

@@ -80,6 +80,18 @@ const MAX_WEIGHT_GRAMS = 500_000;
 const MAX_LOW_STOCK_AT = 100_000;
 const MAX_TAX_RATE_BPS = 10_000;
 
+/**
+ * The two caps that are about a whole PRODUCT rather than one cell.
+ *
+ * They matter more than the lengths above. The console's edit form
+ * parses a product back through `productPayloadSchema`, which caps
+ * variants at 200 and an option axis's values at 50 — so an import that
+ * skipped these would create a product the merchant can then never save
+ * from the console again, with nothing on screen explaining why.
+ */
+const MAX_VARIANTS_PER_PRODUCT = 200;
+const MAX_OPTION_VALUES = 50;
+
 // ───────────────────────────────────────────────────────────────
 // Columns
 // ───────────────────────────────────────────────────────────────
@@ -709,8 +721,19 @@ export function parseCatalogCsv(records: string[][]): ParsedCatalogCsv {
         message: `No usable variant rows for "${draft.handle}".`,
       });
     }
+    if (draft.variants.length > MAX_VARIANTS_PER_PRODUCT) {
+      issues.push({
+        row: draft.row,
+        column: "handle",
+        message:
+          `"${draft.handle}" has ${draft.variants.length} variant rows, and a product can ` +
+          `have at most ${MAX_VARIANTS_PER_PRODUCT}. Split it, or check the handle column ` +
+          `for rows that were meant to be separate products.`,
+      });
+    }
     if (optionColumns) {
       draft.optionNames = finaliseAxisNames(draft, axisSlots.get(draft.handle) ?? [], issues);
+      countOptionValues(draft, issues);
     }
     // The column exists and no row filled it in: "not hidden from search".
     if (has("seo_noindex")) draft.seoNoindex ??= false;
@@ -908,6 +931,33 @@ function finaliseAxisNames(
   }
 
   return names;
+}
+
+/**
+ * How many distinct values each axis takes across the file.
+ *
+ * The console's schema caps an axis at 50, and this file is the only
+ * writer that does not go through it. Counted from the rows rather than
+ * from a declared list because the CSV has no way to declare one — an
+ * axis's values are whatever its variants use.
+ */
+function countOptionValues(draft: CsvProductDraft, issues: CsvIssue[]): void {
+  (draft.optionNames ?? []).forEach((name, i) => {
+    const values = new Set<string>();
+    for (const variant of draft.variants) {
+      const value = variant.options?.[name];
+      if (value !== undefined) values.add(value);
+    }
+    if (values.size > MAX_OPTION_VALUES) {
+      issues.push({
+        row: draft.row,
+        column: `option${i + 1}_value`,
+        message:
+          `"${name}" takes ${values.size} different values in this file, and an option can ` +
+          `have at most ${MAX_OPTION_VALUES}.`,
+      });
+    }
+  });
 }
 
 function readOptions(slots: (string | null)[], cell: Cell, report: Report): OptionSelection {
