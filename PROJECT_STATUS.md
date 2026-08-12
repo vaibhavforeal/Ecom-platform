@@ -25,7 +25,7 @@ Working notes for picking this up after a break. Architecture lives in
 | Storefront query layer | ✅ listing, PDP, slug resolution, sitemap — integration tested |
 | Storefront pages | ✅ home, category, collection, PDP, search — verified over HTTP |
 | SEO surface (JSON-LD, sitemap, canonicals, redirects) | ✅ verified over HTTP |
-| Media pipeline | ✅ Upload endpoint + worker job — validate, dedupe, AVIF/WebP/JPEG ladder |
+| Media pipeline | ✅ Upload endpoint + worker job — validate, dedupe, AVIF/WebP/JPEG ladder; cards and the PDP hero serve the ladder, `(tenant_id, checksum)` is unique |
 | HTML sanitiser | ✅ Allowlist, applied on write; the PDP now renders rich descriptions |
 | Console catalog CRUD | ✅ Products, variants, options, media attach, categories, collections, slug history |
 | Bulk CSV import/export | ✅ One row per variant, dry-run by default, whole file in one transaction, export is the exact inverse |
@@ -118,6 +118,16 @@ pnpm typecheck           6/6 packages
 pnpm build               2/2 Next apps
 pnpm test                321 unit tests     (core 277, integrations 44)
 pnpm test:integration    146 tests          (console 89, core 22, db 20, storefront 9, worker 6)
+```
+
+### Re-verified 2026-08-12 (after serving derivatives + the unique checksum index, full, all green)
+
+```
+pnpm lint                clean
+pnpm typecheck           6/6 packages
+pnpm build               2/2 Next apps
+pnpm test                321 unit tests     (core 277, integrations 44)
+pnpm test:integration    159 tests          (console 89, core 25, db 24, storefront 15, worker 6)
 ```
 
 `apps/storefront` gained a test surface for the first time, so it now has the
@@ -322,6 +332,24 @@ If the database volume survived, the two demo tenants are still seeded. If not:
   expiring — strictly worse than the stale cache it was meant to fix.
   The console test asserts this by reading the row on an independent
   connection at the moment the purge arrives.
+- **A bound string parameter cast straight to `::jsonb` stores a jsonb
+  STRING.** postgres.js asks the server for the parameter's inferred type,
+  sees `jsonb`, and JSON-*encodes* the string it was handed — so
+  `${JSON.stringify(x)}::jsonb` writes `"[{…}]"`, a jsonb string that
+  spells an array rather than the array. Drizzle's own writes are
+  unaffected (it sends parameters as text), and reading one back through
+  Drizzle hides it, because its jsonb decoder parses a string value. But
+  `jsonb_build_object` nests it as a string, and the storefront then finds
+  no derivatives on a row that looks correct in psql. Test fixtures bind
+  `::text::jsonb`.
+- **Drizzle's migrator runs every pending migration inside ONE
+  transaction.** So `CREATE INDEX CONCURRENTLY` is illegal in a migration
+  file — the unique checksum index de-duplicates first instead, which is
+  atomic with the DDL that follows it. And a migration touching a
+  tenant-scoped table only sees rows because `app_migrator` has
+  BYPASSRLS: without it a data-repair step finds nothing, reports
+  nothing, and succeeds. That migration asserts the role can bypass RLS
+  rather than trusting it.
 - **A blank cell states NOTHING — including `variant_active`.** Every
   product column already worked that way, but the variant flag defaulted
   a blank to `true`, so a file that merely carried the column put a
