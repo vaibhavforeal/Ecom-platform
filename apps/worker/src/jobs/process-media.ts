@@ -1,6 +1,8 @@
 import sharp from "sharp";
 import type { Sharp } from "sharp";
 
+import { catalogPurgeTags } from "@platform/core/catalog";
+import { purgeStorefrontCache } from "@platform/core/catalog/server";
 import {
   MAX_IMAGE_PIXELS,
   derivativeStorageKey,
@@ -55,9 +57,36 @@ function encode(pipeline: Sharp, format: ImageFormat): Sharp {
   }
 }
 
-export async function processMedia(
-  job: ProcessMediaJob,
-): Promise<{ width: number; height: number; derivatives: number }> {
+export type ProcessMediaResult = { width: number; height: number; derivatives: number };
+
+/**
+ * Encodes the ladder, then tells the storefront to drop what it cached.
+ *
+ * THE PURGE IS NOT OPTIONAL BOOKKEEPING. The console's save is what
+ * purges on the write path, and it runs while this row is still
+ * `pending` — so the storefront re-caches the placeholder: a card with
+ * no image, a hero-less PDP, and JSON-LD/OG tags with no `image`. This
+ * job finishes seconds later and nothing else purges, so that page stays
+ * live for the full 300s TTL with no way for the merchant to force it.
+ *
+ * Tenant-wide tags rather than per-product: a media row can hang off any
+ * number of products and this job does not know which, so the narrower
+ * tags would be the wrong set rather than a cheaper one.
+ *
+ * Sequenced OUTSIDE the try/catch below, deliberately twice over.
+ * `purgeStorefrontCache` never throws — refused connection, 500,
+ * timeout, malformed origin all end in its own catch — but if it ever
+ * did, throwing inside that block would mark a row `failed` that is in
+ * fact `ready`, which is worse than a stale cache. Rule 2 of
+ * `catalog/purge.ts`: a failed purge must never fail the write.
+ */
+export async function processMedia(job: ProcessMediaJob): Promise<ProcessMediaResult> {
+  const result = await generateDerivatives(job);
+  await purgeStorefrontCache(job.tenantId, catalogPurgeTags(job.tenantId));
+  return result;
+}
+
+async function generateDerivatives(job: ProcessMediaJob): Promise<ProcessMediaResult> {
   const { tenantId, mediaId } = job;
 
   // Contract: tenant context first, before touching any tenant data.

@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { rm } from "node:fs/promises";
+import { createServer } from "node:http";
+import type { Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -9,7 +11,7 @@ import type { MediaDerivative } from "@platform/core/media";
 import { getStorage } from "@platform/integrations/storage";
 import postgres from "postgres";
 import sharp from "sharp";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { processMedia } from "../src/jobs/process-media";
 
@@ -124,7 +126,55 @@ function bombPng(width: number, height: number): Buffer {
   ]);
 }
 
+/**
+ * A stub storefront, standing in for the purge endpoint.
+ *
+ * It exists for two reasons. The first is that `vitest.integration.config.ts`
+ * loads the repo `.env`, which points `STOREFRONT_INTERNAL_ORIGIN` at
+ * `http://localhost:3000` — so without an origin of our own, every job
+ * in this file would POST the real internal secret at whatever holds
+ * that port. The second is that the purge is a property of the job now:
+ * the console purges while the row is still `pending`, so if this one
+ * does not purge on completion, the storefront serves a placeholder card
+ * and a hero-less PDP for the full 300s TTL.
+ */
+let purgeServer: Server;
+let purged: { secret: string | null; body: { tenantId?: string; tags?: string[] } }[] = [];
+
+function startStubStorefront(): Promise<{ server: Server; origin: string }> {
+  const created = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => chunks.push(chunk));
+    req.on("end", () => {
+      purged.push({
+        secret: (req.headers["x-internal-secret"] as string | undefined) ?? null,
+        body: JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}") as {
+          tenantId?: string;
+          tags?: string[];
+        },
+      });
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end('{"purged":3}');
+    });
+  });
+
+  return new Promise((resolve) => {
+    created.listen(0, "127.0.0.1", () => {
+      const address = created.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      resolve({ server: created, origin: `http://127.0.0.1:${port}` });
+    });
+  });
+}
+
+const PURGE_SECRET = "worker-purge-secret-77c31e";
+
 beforeAll(async () => {
+  const started = await startStubStorefront();
+  purgeServer = started.server;
+  process.env.STOREFRONT_INTERNAL_ORIGIN = started.origin;
+  process.env.INTERNAL_API_SECRET = PURGE_SECRET;
+
   const [plan] = await admin<{ id: string }[]>`
     INSERT INTO plans (id, code, name)
     VALUES (${randomUUID()}, ${"m-" + randomUUID().slice(0, 8)}, 'Media test plan')
@@ -143,7 +193,12 @@ beforeAll(async () => {
   tenantB = await mkTenant();
 });
 
+beforeEach(() => {
+  purged = [];
+});
+
 afterAll(async () => {
+  await new Promise<void>((resolve) => purgeServer.close(() => resolve()));
   await admin.end();
   await closeConnections();
   await rm(MEDIA_ROOT, { recursive: true, force: true });
@@ -377,5 +432,96 @@ describe("processMedia", () => {
     expect(row.status).toBe("pending");
     expect(row.processing_error).toBeNull();
     expect(asDerivatives(row.derivatives)).toHaveLength(0);
+  });
+});
+
+describe("processMedia purges the storefront when the row goes ready", () => {
+  /**
+   * THE SEQUENCE THIS EXISTS FOR
+   *
+   *   upload → attach → save (the console purges; the storefront caches
+   *   the `pending` placeholder) → this job finishes seconds later.
+   *
+   * Nothing else purges after that, so without this the placeholder card,
+   * the hero-less PDP and the empty JSON-LD `image` / OG tags stay live
+   * for the whole 300s TTL, with no way for the merchant to force it.
+   */
+  it("sends the tenant's tags, with the secret, once the row is ready", async () => {
+    const png = await sharp({
+      create: { width: 700, height: 700, channels: 3, background: { r: 30, g: 90, b: 30 } },
+    })
+      .png()
+      .toBuffer();
+
+    const { id } = await givenPendingMedia(tenantA, png, { mimeType: "image/png", ext: "png" });
+
+    await processMedia({ tenantId: tenantA, mediaId: id });
+
+    expect(await readMedia(id)).toMatchObject({ status: "ready" });
+
+    expect(purged).toHaveLength(1);
+    expect(purged[0]!.secret).toBe(PURGE_SECRET);
+    expect(purged[0]!.body.tenantId).toBe(tenantA);
+    // Written out in full rather than taken from `catalogTags`: the
+    // failure being guarded is the two sides disagreeing about the
+    // string, and a test that asks the implementation what the string is
+    // cannot see that. Tenant-wide only — a media row can hang off any
+    // number of products and this job does not know which.
+    expect(purged[0]!.body.tags).toEqual([
+      `t:${tenantA}:catalog`,
+      `t:${tenantA}:slugs`,
+      `t:${tenantA}:categories`,
+    ]);
+  });
+
+  it("does not purge for a job that failed", async () => {
+    const png = await sharp({
+      create: { width: 60, height: 60, channels: 3, background: { r: 4, g: 4, b: 4 } },
+    })
+      .png()
+      .toBuffer();
+
+    // The original is never stored, so the job throws where it reads it.
+    const { id } = await givenPendingMedia(tenantA, png, {
+      mimeType: "image/png",
+      ext: "png",
+      store: false,
+    });
+
+    await expect(processMedia({ tenantId: tenantA, mediaId: id })).rejects.toThrow();
+
+    expect(await readMedia(id)).toMatchObject({ status: "failed" });
+    // Nothing changed on the storefront's side of the row, and BullMQ
+    // will retry — a purge per attempt would empty a correct cache five
+    // times over for one broken image.
+    expect(purged).toHaveLength(0);
+  });
+
+  it("does not fail the job when the purge does", async () => {
+    const png = await sharp({
+      create: { width: 300, height: 300, channels: 3, background: { r: 60, g: 10, b: 10 } },
+    })
+      .png()
+      .toBuffer();
+
+    const { id } = await givenPendingMedia(tenantA, png, { mimeType: "image/png", ext: "png" });
+
+    const origin = process.env.STOREFRONT_INTERNAL_ORIGIN;
+    // Port 1 — privileged, nothing listens, refused immediately rather
+    // than timing out.
+    process.env.STOREFRONT_INTERNAL_ORIGIN = "http://127.0.0.1:1";
+    try {
+      // The derivatives are written and committed; the cache is stale for
+      // at most the TTL, which is exactly the backstop the TTL is. Rule 2
+      // of `catalog/purge.ts`. Throwing here would instead mark a `ready`
+      // row `failed` and hand BullMQ a job it can never complete.
+      const result = await processMedia({ tenantId: tenantA, mediaId: id });
+      expect(result.derivatives).toBeGreaterThan(0);
+    } finally {
+      process.env.STOREFRONT_INTERNAL_ORIGIN = origin;
+    }
+
+    expect(await readMedia(id)).toMatchObject({ status: "ready" });
+    expect(purged).toHaveLength(0);
   });
 });
