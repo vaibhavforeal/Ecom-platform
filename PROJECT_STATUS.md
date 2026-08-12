@@ -110,6 +110,21 @@ pnpm test                317 unit tests     (core 273, integrations 44)
 pnpm test:integration    127 tests          (console 79, core 22, db 20, worker 6)
 ```
 
+### Re-verified 2026-08-12 (after the cache purge endpoint, full, all green)
+
+```
+pnpm lint                clean
+pnpm typecheck           6/6 packages
+pnpm build               2/2 Next apps
+pnpm test                321 unit tests     (core 277, integrations 44)
+pnpm test:integration    146 tests          (console 89, core 22, db 20, storefront 9, worker 6)
+```
+
+`apps/storefront` gained a test surface for the first time, so it now has the
+same `tsconfig.json` / `tsconfig.test.json` split as `apps/console` — tests must
+stay out of what `next build` typechecks, or a production install without
+devDependencies fails the build.
+
 The Postgres volume survived the restart: both demo tenants (`acme`, `globex`) and
 their `.localhost` domains are still seeded. `users` is empty, so the staff row for
 console login needs re-adding with the SQL in the README before the console is usable.
@@ -284,6 +299,29 @@ If the database volume survived, the two demo tenants are still seeded. If not:
   in two imports that are each under it — fifty values, then five more.
   `bulk.ts` re-checks both after merging; `csv.ts` keeps the file-level
   check only so the common case is refused before a transaction opens.
+- **`revalidateTag` only clears the CALLING process's cache.** Next's
+  tag manifest is a module-level `Map`, so the console cannot purge the
+  storefront's cache however it calls the function. Hence
+  `POST /api/internal/revalidate` on the storefront. The same fact caps
+  the design: one purge reaches ONE storefront process, so more than one
+  replica needs a load balancer that fans the purge out, or those
+  replicas wait out the TTL.
+- **Next 15.3–15.5 ignore every `revalidateTag` on a tag after the
+  first.** `FileSystemCache.revalidateTag` guards its write with
+  `if (!tagsManifest.has(tag))`, so the manifest keeps the timestamp of
+  the first purge forever. Staleness is `revalidatedAt >= entry.lastModified`,
+  and an entry re-cached after that first purge always has a later
+  `lastModified` — so it is never evicted again. 15.2.9 and earlier set
+  the timestamp unconditionally; Next 16 rewrote the manifest to hold
+  `{revalidated, expired}` objects and also sets them unconditionally.
+  There is a characterisation test pinning the broken behaviour; when it
+  starts failing, Next has been fixed and it should be deleted.
+- **A purge must be issued AFTER the transaction commits.** One issued
+  from inside can race a storefront reader into re-caching the
+  pre-commit row, and that entry then lives out its full TTL instead of
+  expiring — strictly worse than the stale cache it was meant to fix.
+  The console test asserts this by reading the row on an independent
+  connection at the moment the purge arrives.
 - **A blank cell states NOTHING — including `variant_active`.** Every
   product column already worked that way, but the variant flag defaulted
   a blank to `true`, so a file that merely carried the column put a
@@ -303,7 +341,7 @@ If the database volume survived, the two demo tenants are still seeded. If not:
 | WhatsApp Business verification | Blocks Phase 4 messaging | Weeks |
 | Ekart partner agreement | API docs and credentials are gated behind a Flipkart commercial agreement | Unknown |
 | Version control | The project is **not** a git repository yet | Minutes |
-| Storefront cache purge on catalog writes | `apps/storefront/src/lib/catalog.ts` tags every cached read and documents tag purges as "the primary invalidation path" — but nothing purges them, because until now nothing wrote. A merchant who edits a price waits up to the 300s TTL to see it. `revalidateTag` only clears the CALLING app's cache, so the console cannot do it directly: it needs either a shared cache handler or an internal purge endpoint on the storefront (the `/api/internal/verify-domain` shared-secret pattern already exists to copy). Verified live: the redirect and description below only appeared after the storefront was restarted | Half a day |
+| **Storefront cache purge — BLOCKED on a Next defect** | The purge endpoint is built and wired (`POST /api/internal/revalidate`, called from `packages/core/src/catalog/purge.ts` after every committed write) and it works — **once**. `FileSystemCache.revalidateTag` in Next 15.3.0 → 15.5.23 reads `if (!tagsManifest.has(tag)) tagsManifest.set(tag, Date.now())`, so the manifest keeps the timestamp of the FIRST purge of a tag and never moves it. Since `catalogTags.all` is on every catalog write, only the first write per tenant per storefront process is purged; every later edit waits out the 300s TTL. Pinned by a characterisation test in `apps/storefront/tests/cache-purge.integration.test.ts`. **Needs a decision:** upgrade to Next 16 (fixed there), adopt a custom cache handler, or switch to key-generation cache busting. A downgrade to 15.2.9 (the last unaffected release) would reintroduce CVEs fixed in 15.4.7 | Owner decision |
 | Stock levels | The console can set a variant's SKU, price and low-stock threshold but not its quantity — there is no `stock_movements` table yet. The inventory ledger is Phase 2 (blueprint §4.5), and a mutable counter would be the wrong thing to add early | Phase 2 |
 
 ---

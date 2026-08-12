@@ -18,9 +18,11 @@ import type {
   ImportProductResult,
   ImportReport,
 } from "./csv";
+import { catalogPurgeTags } from "./cache-tags";
 import { EXPORT_PAGE_SIZE, getProductForConsoleInTx, listProductsForExport } from "./console-queries";
 import type { ConsoleProduct, ConsoleVariant } from "./console-queries";
 import { optionKey } from "./options";
+import { purgeStorefrontCache } from "./purge";
 import type { OptionAxis, OptionSelection } from "./options";
 import { slugify } from "./slug";
 import {
@@ -131,29 +133,45 @@ export async function runCatalogImport(
 
   if (parsed.issues.length > 0) return rejected(parsed.issues, parsed.rowCount);
 
+  let report: ImportReport;
+
   try {
-    return await withTenant(ctx.tenantId, async (tx) => {
+    report = await withTenant(ctx.tenantId, async (tx) => {
       const results: ImportProductResult[] = [];
 
       for (const draft of parsed.products) {
         results.push(await applyProduct(tx, ctx, draft));
       }
 
-      const report = summarise(results, parsed.rowCount, opts.commit === true);
+      const built = summarise(results, parsed.rowCount, opts.commit === true);
 
       // The dry run does every write and then throws it all away, so
       // what the merchant approves is a preview of writes that really
       // happened — SKU collisions, matrix errors and unique indexes
       // included — rather than of writes we believe would happen.
-      if (opts.commit !== true) throw new DryRunRollback(report);
+      if (opts.commit !== true) throw new DryRunRollback(built);
 
-      return report;
+      return built;
     });
   } catch (err) {
     if (err instanceof DryRunRollback) return err.report;
     if (err instanceof ImportRejected) return rejected(err.issues, parsed.rowCount);
     throw err;
   }
+
+  /**
+   * Purged once, for the whole file, and only after the transaction has
+   * committed — see invariant 4 in `writes.ts`. A dry run returns from
+   * the catch above having rolled everything back, so it never gets
+   * here: purging on a dry run would evict a correct cache and refill it
+   * with the same data, for a write that did not happen.
+   *
+   * No per-product tags. `catalogTags.all` already covers every entry
+   * the file touched, and a thousand-row import would otherwise send a
+   * thousand tags at a purge endpoint that caps them at 64.
+   */
+  await purgeStorefrontCache(ctx.tenantId, catalogPurgeTags(ctx.tenantId));
+  return report;
 }
 
 function rejected(issues: CsvIssue[], rows: number): ImportReport {

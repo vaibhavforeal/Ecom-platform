@@ -21,9 +21,11 @@ import type { ProductStatus, SlugEntityType, Tx } from "@platform/db";
 
 import { recordAudit } from "../audit/index";
 import { AppError } from "../errors";
+import { catalogPurgeTags } from "./cache-tags";
 import { isDescendant } from "./categories";
 import { validateVariantMatrix } from "./options";
 import type { OptionAxis, OptionSelection } from "./options";
+import { purgeStorefrontCache } from "./purge";
 import { sanitizeDescriptionHtml } from "./sanitize-html";
 import { availableSlug, slugify } from "./slug";
 
@@ -56,6 +58,21 @@ import { availableSlug, slugify } from "./slug";
  *     checks foreign keys as the table owner with row security bypassed,
  *     so a `mediaId` belonging to another merchant would satisfy the FK
  *     and attach cleanly. RLS does NOT close this; the SELECTs below do.
+ *
+ *  4. **The storefront's cache is purged AFTER the commit.** Every
+ *     public entry point below awaits its `withTenant` and only then
+ *     calls `purgeStorefrontCache` — outside the transaction, never
+ *     inside it. A purge issued while the transaction is still open can
+ *     race a storefront reader into re-caching the pre-commit row, and
+ *     that entry then lives out its full TTL instead of expiring. The
+ *     purge lives here, next to the commit, rather than in the console's
+ *     route handlers for the same reason the sanitiser does: there are
+ *     six write entry points and a CSV importer, and the one that
+ *     forgets is the one a merchant files a ticket about.
+ *
+ *     The `…InTx` variants deliberately do NOT purge. They run inside a
+ *     transaction the caller owns and have no idea when — or whether —
+ *     it commits; `runCatalogImport` purges once for the whole file.
  */
 
 // ───────────────────────────────────────────────────────────────
@@ -689,7 +706,10 @@ export async function createProduct(
   ctx: WriteContext,
   input: ProductWriteInput,
 ): Promise<ProductWriteResult> {
-  return withTenant(ctx.tenantId, (tx) => createProductInTx(tx, ctx, input));
+  const result = await withTenant(ctx.tenantId, (tx) => createProductInTx(tx, ctx, input));
+  // Committed. Only now — see invariant 4.
+  await purgeStorefrontCache(ctx.tenantId, catalogPurgeTags(ctx.tenantId, [result.productId]));
+  return result;
 }
 
 /**
@@ -777,7 +797,16 @@ export async function updateProduct(
   productId: string,
   input: ProductWriteInput,
 ): Promise<ProductWriteResult> {
-  return withTenant(ctx.tenantId, (tx) => updateProductInTx(tx, ctx, productId, input));
+  const result = await withTenant(ctx.tenantId, (tx) =>
+    updateProductInTx(tx, ctx, productId, input),
+  );
+  // Committed. Only now — see invariant 4. `catalogTags.slugs` is in
+  // the purged set unconditionally, which is what fixes the OLD URL on
+  // a rename: `result.previousSlug` names it, but every slug entry for
+  // the tenant carries that one tag, so both the old slug's stale
+  // "render" answer and the new slug's stale "404" go together.
+  await purgeStorefrontCache(ctx.tenantId, catalogPurgeTags(ctx.tenantId, [result.productId]));
+  return result;
 }
 
 /** `updateProduct`, joining the caller's transaction. See `createProductInTx`. */
@@ -904,7 +933,7 @@ export async function createCategory(
   ctx: WriteContext,
   input: TaxonomyWriteInput,
 ): Promise<TaxonomyWriteResult> {
-  return withTenant(ctx.tenantId, async (tx) => {
+  const result = await withTenant(ctx.tenantId, async (tx) => {
     if (input.parentId) await assertCategoryExists(tx, ctx.tenantId, input.parentId);
 
     const [row] = await tx
@@ -945,6 +974,10 @@ export async function createCategory(
 
     return { id: row.id, slug, previousSlug: null };
   });
+
+  // Committed. Only now — see invariant 4.
+  await purgeStorefrontCache(ctx.tenantId, catalogPurgeTags(ctx.tenantId));
+  return result;
 }
 
 export async function updateCategory(
@@ -952,7 +985,7 @@ export async function updateCategory(
   categoryId: string,
   input: TaxonomyWriteInput,
 ): Promise<TaxonomyWriteResult> {
-  return withTenant(ctx.tenantId, async (tx) => {
+  const result = await withTenant(ctx.tenantId, async (tx) => {
     const [existing] = await tx
       .select({ id: categories.id, title: categories.title, isVisible: categories.isVisible })
       .from(categories)
@@ -1011,13 +1044,17 @@ export async function updateCategory(
 
     return { id: categoryId, slug, previousSlug: previous };
   });
+
+  // Committed. Only now — see invariant 4.
+  await purgeStorefrontCache(ctx.tenantId, catalogPurgeTags(ctx.tenantId));
+  return result;
 }
 
 export async function createCollection(
   ctx: WriteContext,
   input: TaxonomyWriteInput,
 ): Promise<TaxonomyWriteResult> {
-  return withTenant(ctx.tenantId, async (tx) => {
+  const result = await withTenant(ctx.tenantId, async (tx) => {
     const [row] = await tx
       .insert(collections)
       .values({
@@ -1055,6 +1092,10 @@ export async function createCollection(
 
     return { id: row.id, slug, previousSlug: null };
   });
+
+  // Committed. Only now — see invariant 4.
+  await purgeStorefrontCache(ctx.tenantId, catalogPurgeTags(ctx.tenantId));
+  return result;
 }
 
 export async function updateCollection(
@@ -1062,7 +1103,7 @@ export async function updateCollection(
   collectionId: string,
   input: TaxonomyWriteInput,
 ): Promise<TaxonomyWriteResult> {
-  return withTenant(ctx.tenantId, async (tx) => {
+  const result = await withTenant(ctx.tenantId, async (tx) => {
     const [existing] = await tx
       .select({ id: collections.id, title: collections.title, isVisible: collections.isVisible })
       .from(collections)
@@ -1114,6 +1155,10 @@ export async function updateCollection(
 
     return { id: collectionId, slug, previousSlug: previous };
   });
+
+  // Committed. Only now — see invariant 4.
+  await purgeStorefrontCache(ctx.tenantId, catalogPurgeTags(ctx.tenantId));
+  return result;
 }
 
 // ───────────────────────────────────────────────────────────────

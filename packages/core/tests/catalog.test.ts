@@ -5,6 +5,8 @@ import {
   MAX_SLUG_LENGTH,
   availableSlug,
   buildCategoryTree,
+  catalogPurgeTags,
+  catalogTags,
   cartesianCombinations,
   categoryPath,
   discountPercent,
@@ -18,6 +20,7 @@ import {
   resolveSlug,
   slugify,
   subtreeIds,
+  tenantTagPrefix,
   validateVariantMatrix,
 } from "../src/catalog/index";
 import type { CategoryNode, OptionAxis } from "../src/catalog/index";
@@ -489,5 +492,63 @@ describe("subtreeIds", () => {
 
   it("is just the node for a leaf", () => {
     expect(subtreeIds(NODES, "formal")).toEqual(["formal"]);
+  });
+});
+
+describe("storefront cache tags", () => {
+  /**
+   * These strings are a CONTRACT between two processes. The storefront
+   * stores cache entries under them and the console names them to purge
+   * them, and a mismatch purges nothing at all — silently, with no error
+   * and nothing in a log. So they are written out here in full rather
+   * than built from the functions under test, which would make this pass
+   * for any scheme at all.
+   */
+  const TENANT = "11111111-2222-3333-4444-555555555555";
+  const PRODUCT = "99999999-8888-7777-6666-555555555555";
+
+  it("builds the exact tag strings the storefront caches under", () => {
+    expect(catalogTags.all(TENANT)).toBe("t:11111111-2222-3333-4444-555555555555:catalog");
+    expect(catalogTags.slugs(TENANT)).toBe("t:11111111-2222-3333-4444-555555555555:slugs");
+    expect(catalogTags.categories(TENANT)).toBe(
+      "t:11111111-2222-3333-4444-555555555555:categories",
+    );
+    expect(catalogTags.product(TENANT, PRODUCT)).toBe(
+      "t:11111111-2222-3333-4444-555555555555:product:99999999-8888-7777-6666-555555555555",
+    );
+  });
+
+  it("prefixes every tag with the tenant, which is what bounds a purge", () => {
+    // The purge endpoint refuses any tag not starting with this, so the
+    // prefix has to be a genuine prefix of all four.
+    expect(tenantTagPrefix(TENANT)).toBe("t:11111111-2222-3333-4444-555555555555:");
+
+    for (const tag of catalogPurgeTags(TENANT, [PRODUCT])) {
+      expect(tag.startsWith(tenantTagPrefix(TENANT)), tag).toBe(true);
+    }
+
+    // And it does not match a DIFFERENT tenant whose id merely starts
+    // the same way — the trailing colon is load-bearing.
+    const sibling = TENANT + "-extra";
+    expect(catalogTags.all(sibling).startsWith(tenantTagPrefix(TENANT))).toBe(false);
+  });
+
+  it("covers the whole write, product tags last", () => {
+    expect(catalogPurgeTags(TENANT, [PRODUCT])).toEqual([
+      "t:11111111-2222-3333-4444-555555555555:catalog",
+      "t:11111111-2222-3333-4444-555555555555:slugs",
+      "t:11111111-2222-3333-4444-555555555555:categories",
+      "t:11111111-2222-3333-4444-555555555555:product:99999999-8888-7777-6666-555555555555",
+    ]);
+  });
+
+  it("drops to the tenant-wide set when no product is named", () => {
+    // What a taxonomy write and a bulk import send. `:catalog` is on
+    // every cached entry, so this is still a complete purge.
+    expect(catalogPurgeTags(TENANT)).toEqual([
+      "t:11111111-2222-3333-4444-555555555555:catalog",
+      "t:11111111-2222-3333-4444-555555555555:slugs",
+      "t:11111111-2222-3333-4444-555555555555:categories",
+    ]);
   });
 });

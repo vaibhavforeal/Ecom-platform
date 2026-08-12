@@ -10,5 +10,11 @@
     "paths": { "@/*": ["./src/*"] }
   },
   "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
-  "exclude": ["node_modules"]
+  // `next build` typechecks whatever this includes. Tests import vitest
+  // and postgres, both devDependencies, so leaving them in here makes a
+  // production install without devDependencies fail the build. They are
+  // still typechecked — by tsconfig.test.json, which the package's
+  // `typecheck` script runs straight after this one. Same split as
+  // apps/console.
+  "exclude": ["node_modules", "tests", "vitest.integration.config.ts"]
 }
