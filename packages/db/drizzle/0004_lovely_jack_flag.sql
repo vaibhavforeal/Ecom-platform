@@ -105,10 +105,13 @@ BEGIN
     which is one end state for all three topologies (keeper + loser,
     loser alone, several losers) and needs no case analysis.
 
-    DISTINCT ON collapses the several-losers case to a single candidate
-    before the insert: ON CONFLICT arbitrates against rows already in
-    the table, not against the rest of its own command. Ordering by
-    position means the survivor keeps the earliest slot the image held.
+    DISTINCT ON is for DETERMINISM, not for correctness. DO NOTHING
+    would survive the several-losers case on its own — it arbitrates
+    against a dirty snapshot, so it does see rows inserted earlier in
+    the same command, and `VALUES (1,1),(1,1) ON CONFLICT DO NOTHING`
+    reports `INSERT 0 1`. What it does not decide is WHICH loser's
+    position the keeper inherits. Ordering by position picks that: the
+    survivor keeps the earliest slot the image held, on every plan.
   */
   INSERT INTO product_media (tenant_id, product_id, media_id, position)
   SELECT DISTINCT ON (pm.tenant_id, pm.product_id, d.keeper)
