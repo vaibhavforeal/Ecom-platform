@@ -173,6 +173,16 @@ async function snapshot(tenantId: string): Promise<Snapshot> {
 }
 
 beforeAll(async () => {
+  // A committed import purges, and the repo `.env` this config loads
+  // points the origin at `http://localhost:3000` — so without this
+  // every committed file in this suite POSTs the REAL internal secret
+  // at whatever holds port 3000 on the machine. Nothing here asserts a
+  // purge; that contract, including the no-op case below, lives in
+  // `cache-purge.integration.test.ts` against a stub storefront it
+  // owns. Unset, `purgeStorefrontCache` logs `cache.purge_unconfigured`
+  // and returns without a request.
+  delete process.env.STOREFRONT_INTERNAL_ORIGIN;
+
   tenantA = await makeTenant();
   tenantB = await makeTenant();
   ownerToken = await makeSession(tenantA, "owner");
@@ -286,7 +296,14 @@ describe("the round trip — export, re-import, and nothing happens", () => {
     // a Devanagari or Tamil product name opens as mojibake. Asserted on
     // the BYTES, because decoding would strip it.
     expect([...bytes.slice(0, 3)]).toEqual([0xef, 0xbb, 0xbf]);
-    expect(text.slice(1)).toMatch(new RegExp(`^${CSV_COLUMNS.join(",")}\r\n`));
+    // Spelled out rather than built from `CSV_COLUMNS`. A header derived
+    // from the constant agrees with any reordering or rename of it, so
+    // it cannot fail — and this is a file merchants save and script
+    // against. Same reason, same wording, as the unit test in
+    // `packages/core/tests/catalog-csv.test.ts`.
+    expect(text.slice(1)).toMatch(
+      /^handle,title,status,summary,description,product_type,vendor,tags,hsn_code,tax_rate_percent,seo_title,seo_description,seo_noindex,option1_name,option1_value,option2_name,option2_value,option3_name,option3_value,sku,barcode,price,compare_at_price,cost,weight_grams,low_stock_at,variant_active\r\n/,
+    );
 
     // Three variants across two products, and no header repetition.
     const lines = text.trimEnd().split("\r\n");
