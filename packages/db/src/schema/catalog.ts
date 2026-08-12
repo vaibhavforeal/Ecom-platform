@@ -115,6 +115,10 @@ export const media = pgTable(
      * SHA-256 of the original bytes. Lets a re-upload of the same file
      * reuse the existing derivatives instead of paying to process it
      * again — merchants re-upload the same images constantly.
+     *
+     * Nullable: a row can exist before its bytes have been hashed. Under
+     * the unique index below, NULLs are distinct, so any number of
+     * un-hashed rows coexist.
      */
     checksum: text("checksum"),
 
@@ -130,7 +134,14 @@ export const media = pgTable(
   },
   (t) => [
     uniqueIndex("media_tenant_storage_key_key").on(t.tenantId, t.storageKey),
-    index("media_tenant_checksum_idx").on(t.tenantId, t.checksum),
+    // UNIQUE, not merely indexed. The checksum is what makes a
+    // re-upload reuse the derivatives already paid for, so two rows for
+    // one checksum are always a bug: whichever the dedupe SELECT
+    // happens to find keeps its derivatives and the other's are
+    // orphaned in object storage. Not partial on `deleted_at IS NULL`
+    // — the storage key index above is not either, and the upload route
+    // relies on a soft-deleted row still colliding so it can revive it.
+    uniqueIndex("media_tenant_checksum_idx").on(t.tenantId, t.checksum),
     index("media_status_idx").on(t.status),
     check("media_status_check", sql`${t.status} IN (${sql.raw(sqlLiteralList(MEDIA_STATUSES))})`),
     check("media_byte_size_check", sql`${t.byteSize} >= 0`),

@@ -26,7 +26,21 @@ async function main(): Promise<void> {
   const url = process.env.DATABASE_URL_MIGRATOR;
   if (!url) throw new Error("DATABASE_URL_MIGRATOR is not set");
 
-  const sql = postgres(url, { max: 1, onnotice: () => {} });
+  /**
+   * NOTICE is noise here — every `DROP POLICY IF EXISTS` in the RLS
+   * script emits one on every run — but anything louder is a migration
+   * telling you what it did to your data, and swallowing that is how a
+   * destructive step goes unnoticed. Only NOTICE and below is dropped.
+   */
+  const quiet = new Set(["DEBUG", "LOG", "INFO", "NOTICE"]);
+  const sql = postgres(url, {
+    max: 1,
+    onnotice: (notice) => {
+      if (!quiet.has(notice.severity ?? "NOTICE")) {
+        console.warn(`  ! ${notice.severity}: ${notice.message}`);
+      }
+    },
+  });
 
   try {
     if (!existsSync(MIGRATIONS_DIR)) {
