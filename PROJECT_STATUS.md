@@ -14,7 +14,7 @@ Working notes for picking this up after a break. Architecture lives in
 | :--- | :--- |
 | **Phase 0 — Foundations** | ✅ Complete and verified end to end |
 | **Multi-carrier logistics** | ✅ Framework complete; vendor HTTP transport deliberately not written |
-| **Phase 1 — Catalog & Storefront** | 🟡 In progress — data model, domain logic and query layer done |
+| **Phase 1 — Catalog & Storefront** | ✅ Complete — merged to `master` 2026-08-13 (`b219e4f`). See the piece-by-piece table below |
 
 ### Phase 1 progress
 
