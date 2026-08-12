@@ -1,0 +1,5 @@
+﻿handle,status,summary,option1_name,option1_value,sku,barcode,price,weight_grams
+classic-tee,active,"A soft, everyday tee",Size,S,TEE-S,8901234567890,499.00,180
+classic-tee,active,"A soft, everyday tee",Size,M,TEE-M,8901234567891,499.00,190
+classic-tee,active,"A soft, everyday tee",Size,L,TEE-S,8901234567892,499.00,200
+canvas-bag,draft,,,,BAG-1,,Rs 899,400

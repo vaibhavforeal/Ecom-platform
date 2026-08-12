@@ -104,3 +104,6 @@ export const CARRIER_CODES = [
 ] as const;
 
 export type CarrierCode = (typeof CARRIER_CODES)[number];
+
+export const SEARCH_INDEXING_MODES = ["auto", "indexed", "noindex"] as const;
+export type SearchIndexing = (typeof SEARCH_INDEXING_MODES)[number];

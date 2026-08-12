@@ -1,5 +1,6 @@
 import { unstable_cache } from "next/cache";
 
+import { catalogTags } from "@platform/core/catalog";
 import {
   getCollectionById,
   getProductById,
@@ -30,22 +31,22 @@ import type { ListOptions } from "@platform/core/catalog/server";
  *
  * Every entry is tagged so a catalog change can purge precisely what it
  * touched rather than the whole store.
+ *
+ * `catalogTags` itself lives in `@platform/core/catalog` rather than
+ * here. The console has to name these exact strings to purge them
+ * (`POST /api/internal/revalidate`), and a purge tag that does not match
+ * a cache tag purges nothing SILENTLY. One definition, imported by the
+ * reader and the writer, cannot drift from itself.
  */
-
-/** Tags. Tenant-prefixed, so one merchant's purge cannot clear another's. */
-export const catalogTags = {
-  all: (tenantId: string) => `t:${tenantId}:catalog`,
-  product: (tenantId: string, productId: string) => `t:${tenantId}:product:${productId}`,
-  slugs: (tenantId: string) => `t:${tenantId}:slugs`,
-  categories: (tenantId: string) => `t:${tenantId}:categories`,
-};
 
 /**
  * Short by design.
  *
- * Tag purges are the primary invalidation path; this TTL is only the
- * backstop for a purge that never arrives — a worker that died
- * mid-publish, say. Long enough to absorb a traffic spike, short enough
+ * Tag purges are the primary invalidation path — `POST
+ * /api/internal/revalidate`, called by the console after every committed
+ * catalog write. This TTL is only the backstop for a purge that never
+ * arrives: the storefront was unreachable, or a second replica never
+ * heard about it. Long enough to absorb a traffic spike, short enough
  * that a merchant who edits a price does not file a support ticket.
  */
 const TTL_SECONDS = 300;

@@ -2,7 +2,12 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound, permanentRedirect } from "next/navigation";
 
-import { buildCategoryTree, categoryPath, subtreeIds } from "@platform/core/catalog";
+import {
+  buildCategoryTree,
+  categoryPath,
+  sanitizeDescriptionHtml,
+  subtreeIds,
+} from "@platform/core/catalog";
 import type { CategorySummary, ProductDetail } from "@platform/core/catalog/server";
 
 import { JsonLd } from "../../components/JsonLd";
@@ -354,28 +359,27 @@ function ProductView({
         <VariantPicker axes={product.axes} variants={product.variants} />
 
         {/*
-          Rendered as TEXT, not as HTML.
+          Merchant HTML, rendered as HTML.
 
-          `description` is merchant-authored markup. Injecting it with
-          dangerouslySetInnerHTML would be stored XSS on the storefront —
-          and in a multi-tenant SaaS that is not "the merchant attacking
-          themselves": the script would run against THEIR customers, on a
-          page that later collects addresses and payment details.
+          `products.description` is sanitised on the way IN — the console
+          write layer runs `sanitizeDescriptionHtml` before the string
+          reaches the column, so every consumer (this page, CSV export, a
+          WhatsApp preview) gets clean data without each remembering.
+          That is the control.
 
-          The fix is an allowlist sanitiser applied on the way IN, in the
-          console, so every consumer (storefront, CSV export, WhatsApp
-          preview) gets clean data without each remembering to sanitise.
-          That belongs with the console CRUD; until it exists, text is
-          the honest option — losing formatting, not safety.
+          The second pass below is NOT that control and must not be
+          mistaken for it. It is one line that costs microseconds and
+          closes the case the first cannot: a row written by a path that
+          bypassed the write layer — psql, a restored dump, a backfill
+          script — reaching `dangerouslySetInnerHTML`. The sanitiser is
+          idempotent (there is a test), so for a correctly written row
+          this changes precisely nothing.
         */}
         {product.description && (
-          <div className="prose">
-            {plainText(product.description)
-              .split(/\n{2,}/)
-              .map((paragraph, i) => (
-                <p key={i}>{paragraph}</p>
-              ))}
-          </div>
+          <div
+            className="prose"
+            dangerouslySetInnerHTML={{ __html: sanitizeDescriptionHtml(product.description) }}
+          />
         )}
       </article>
     </main>

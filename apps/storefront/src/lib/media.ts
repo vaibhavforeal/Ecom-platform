@@ -1,3 +1,5 @@
+import type { MediaDerivative } from "@platform/core/media";
+
 /**
  * Image URLs.
  *
@@ -11,16 +13,14 @@
  * storefront renders without them.
  */
 
-/** Widths the pipeline generates. Kept here so `srcset` cannot drift. */
-export const IMAGE_WIDTHS = [320, 480, 640, 960, 1280, 1920] as const;
-
-export type MediaDerivative = {
-  format: "avif" | "webp" | "jpeg";
-  width: number;
-  height: number;
-  storageKey: string;
-  byteSize: number;
-};
+/**
+ * The ladder and the record shape are owned by `@platform/core/media` —
+ * the same module the pipeline plans and writes from — and re-exported
+ * here so existing importers are unaffected. One definition is the only
+ * way `srcset` cannot drift from what was actually rendered.
+ */
+export { IMAGE_WIDTHS } from "@platform/core/media";
+export type { MediaDerivative };
 
 function publicBase(): string {
   // Trailing slash trimmed so callers can always join with a single one.

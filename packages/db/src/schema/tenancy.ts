@@ -13,8 +13,13 @@ import {
 } from "drizzle-orm/pg-core";
 import { v7 as uuidv7 } from "uuid";
 
-import { TAX_REGISTRATION_TYPES, TENANT_STATUSES, sqlLiteralList } from "./enums";
-import type { TaxRegistrationType, TenantStatus } from "./enums";
+import {
+  SEARCH_INDEXING_MODES,
+  TAX_REGISTRATION_TYPES,
+  TENANT_STATUSES,
+  sqlLiteralList,
+} from "./enums";
+import type { SearchIndexing, TaxRegistrationType, TenantStatus } from "./enums";
 
 /**
  * CONTROL PLANE — deliberately not RLS-protected.
@@ -60,6 +65,8 @@ export const tenants = pgTable(
     gstin: text("gstin"),
     originStateCode: text("origin_state_code"), // GST state code, e.g. '27'
 
+    searchIndexing: text("search_indexing").$type<SearchIndexing>().notNull().default("auto"),
+
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
     deletedAt: timestamp("deleted_at", { withTimezone: true }),
@@ -71,6 +78,10 @@ export const tenants = pgTable(
     check(
       "tenants_tax_reg_check",
       sql`${t.taxRegistrationType} IN (${sql.raw(sqlLiteralList(TAX_REGISTRATION_TYPES))})`,
+    ),
+    check(
+      "tenants_search_indexing_check",
+      sql`${t.searchIndexing} IN (${sql.raw(sqlLiteralList(SEARCH_INDEXING_MODES))})`,
     ),
   ],
 );

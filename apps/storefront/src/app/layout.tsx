@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import type { ReactNode } from "react";
 
+import { isSearchIndexable } from "@platform/core";
+
 import { getTenant } from "../lib/tenant";
 
 import "./globals.css";
@@ -15,14 +17,15 @@ export async function generateMetadata(): Promise<Metadata> {
   const tenant = await getTenant();
   if (!tenant) return { title: "Not found", robots: { index: false, follow: false } };
 
+  const indexable = isSearchIndexable(tenant);
+
   return {
     title: { default: tenant.displayName, template: `%s · ${tenant.displayName}` },
     // Phase 1 replaces this with per-page SEO from the catalog's `seo`
     // column, plus JSON-LD, canonicals and per-host sitemaps (§6.2).
-    robots:
-      tenant.status === "active"
-        ? { index: true, follow: true }
-        : { index: false, follow: false },
+    robots: indexable
+      ? { index: true, follow: true }
+      : { index: false, follow: false },
   };
 }
 

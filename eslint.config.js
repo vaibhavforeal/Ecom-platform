@@ -7,6 +7,13 @@ export default [
     // edited". Next 15.5 added a triple-slash reference to it, which the
     // shared config rejects — so linting it fails the build for a file
     // nobody wrote and nobody may fix.
+    //
+    // Next 16 emits `import "./.next/types/routes.d.ts"` instead, which
+    // the shared config accepts (checked: the 15 shape still errors
+    // `@typescript-eslint/triple-slash-reference` under this config, the
+    // 16 shape lints clean). Kept anyway — the reason is that the file is
+    // generated and unfixable by hand, and that does not depend on which
+    // rule the next regeneration happens to trip.
     ignores: ["apps/*/next-env.d.ts"],
   },
   {

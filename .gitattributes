@@ -15,6 +15,11 @@
 *.woff2 binary
 *.pdf binary
 
+# CSV test fixtures are byte-exact ON PURPOSE — a UTF-8 BOM and CRLF line
+# endings, because that is what Excel writes and what the importer has to
+# survive. Normalising them to LF would quietly delete half of what they test.
+packages/core/tests/fixtures/*.csv -text
+
 # Generated; collapse in review.
 pnpm-lock.yaml linguist-generated=true -diff
 packages/db/drizzle/meta/*.json linguist-generated=true -diff

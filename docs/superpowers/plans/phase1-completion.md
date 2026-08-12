@@ -1,0 +1,497 @@
+# Phase 1 completion — media pipeline, console CRUD, CSV import/export
+
+Finishes Phase 1 of the multi-tenant commerce platform. Everything below is
+additive to a codebase that is already green: `pnpm lint && pnpm typecheck &&
+pnpm build && pnpm test && pnpm test:integration` all pass at the branch point
+(148 unit tests, 42 integration tests, 2 Next apps building).
+
+Architecture lives in `PLATFORM_BLUEPRINT.md`. Current state and the list of
+traps already hit lives in `PROJECT_STATUS.md` — **every implementer must read
+the "Traps already hit and fixed" section of `PROJECT_STATUS.md` before writing
+code.** Those are bugs this project has already paid for once.
+
+---
+
+## Global Constraints
+
+These bind every task. A violation is a defect regardless of what the task text
+says.
+
+1. **Multi-tenancy is not optional.** No tenant is ever hardcoded. Every data-plane
+   query runs inside `withTenant(tenantId, …)` from `@platform/db`. Any new table
+   carrying `tenant_id` is picked up automatically by `packages/db/src/rls.ts` and
+   gets `FORCE ROW LEVEL SECURITY` + a `tenant_isolation` policy. A new table that
+   must NOT be RLS-protected has to be added to the `PLATFORM_TABLES` allowlist
+   **with a written justification** — the isolation suite fails the build otherwise.
+2. **Vendor neutrality.** No provider name may appear in a branch, a conditional, or
+   a type union outside its own adapter file. Cloudflare R2 is *a* storage driver,
+   never *the* storage layer. Mirror the existing carrier pattern in
+   `packages/integrations/src/carriers/define.ts`.
+3. **Money is integer paise.** Never a float, never a rupee string. See
+   `packages/core/src/catalog/money.ts`.
+4. **Client-safe barrel split.** `@platform/core/catalog` is pure and importable
+   from a client component. Anything touching the database, the filesystem, or a
+   native module goes in a `/server` subpath. Breaking this fails `pnpm build`
+   with an opaque `net`/`fs`/`perf_hooks` error.
+5. **Relative imports are extensionless** repo-wide. Next cannot resolve ESM `.js`
+   specifiers to `.ts` sources.
+6. **Raw SQL fragments in a SELECT list must be `.as(...)` aliased**, and correlated
+   references to an outer table must use a written-out fragment, not an
+   interpolated column. Both traps produce silent NULLs with no error.
+7. **`tx.execute` returns driver-level rows** — no camelCase mapping, no type
+   decoding. A `timestamptz` arrives as a string whatever the annotation claims.
+   Convert at the boundary.
+8. **Ports are non-default on purpose**: Postgres 5442, PgBouncer 6442, Redis 6389.
+   Do not "fix" them.
+9. **Tests are required, and they must be able to fail.** Unit tests go in the
+   package's `tests/`. Anything needing Postgres is an integration test
+   (`*.integration.test.ts` in core, or `packages/db/tests/`). A test asserting
+   only that a function did not throw is not a test.
+10. **The full gate must pass before a task is DONE**: `pnpm lint && pnpm typecheck
+    && pnpm build && pnpm test && pnpm test:integration`. `pnpm` is Corepack-only
+    here — shims are installed at `$HOME/.pnpm-shim`; put that on PATH.
+11. **New env vars must be added to `turbo.json`'s `globalEnv` and to
+    `.env.example`**, or they are silently undefined in a Turbo-cached build.
+12. **Anything that gates on `NODE_ENV === "production"` fails open.** If you add
+    such a gate, the insecure branch must be the one that requires an explicit
+    opt-in, not the default.
+
+---
+
+## Task 1: Per-tenant search indexing setting
+
+**Problem.** A `trial` tenant is currently `noindex` in both `robots.txt` and page
+metadata, derived from `tenant.status`. A trial merchant launching a real store
+wants to be indexed, and a merchant upgrading from trial to active would today be
+silently de-indexed-then-re-indexed by a billing event. Indexing must be an
+explicit per-tenant decision, not a side effect of plan status.
+
+**Schema.** Add to `tenants` (`packages/db/src/schema/tenancy.ts` — control plane,
+correctly not RLS-protected):
+
+```ts
+searchIndexing: text("search_indexing").$type<SearchIndexing>().notNull().default("auto"),
+```
+
+Add to `packages/db/src/schema/enums.ts`:
+
+```ts
+export const SEARCH_INDEXING_MODES = ["auto", "indexed", "noindex"] as const;
+export type SearchIndexing = (typeof SEARCH_INDEXING_MODES)[number];
+```
+
+Add a CHECK constraint using `sql.raw(sqlLiteralList(SEARCH_INDEXING_MODES))` —
+DDL cannot contain bind parameters. Generate a migration with
+`pnpm --filter @platform/db exec drizzle-kit generate` and verify it applies.
+
+**Resolver.** Add a pure function to `packages/core/src/tenancy/` and export it
+from `@platform/core`:
+
+```ts
+export function isSearchIndexable(tenant: {
+  status: TenantStatus;
+  searchIndexing: SearchIndexing;
+}): boolean
+```
+
+Exact semantics, in this precedence order:
+
+1. `status` of `"suspended"` or `"churned"` → **always `false`**. This is a
+   platform safety decision and is NOT merchant-overridable — a suspended store
+   must not stay in the index because someone set `indexed` before suspension.
+2. `searchIndexing === "indexed"` → `true`.
+3. `searchIndexing === "noindex"` → `false`.
+4. `searchIndexing === "auto"` → `status === "active"`.
+
+**Call sites.** Replace the status-derived checks with `isSearchIndexable(tenant)`:
+
+- `apps/storefront/src/app/layout.tsx:23` (page metadata robots)
+- `apps/storefront/src/app/robots.txt/route.ts:31`
+
+Leave `sitemap.xml/route.ts` and `sitemaps/[page]/route.ts` alone: they already
+gate on `suspended`/`churned` only, and a `noindex` store still legitimately
+serves a sitemap. Do NOT change `apps/storefront/src/lib/tenant.ts:68` — that is
+request-level access control, not SEO.
+
+**Tests.** Unit-test the resolver as a truth table: all three modes × all tenant
+statuses, asserting the exact boolean. Include explicitly that
+`{status: "suspended", searchIndexing: "indexed"}` is `false` — that is the
+override the precedence rule exists to prevent.
+
+---
+
+## Task 2: Storage adapter contract + local and S3-compatible drivers
+
+**Problem.** The media pipeline needs somewhere to put bytes. Production is
+Cloudflare R2; local development has no R2 and must not need one. Per Global
+Constraint 2 this is an adapter contract with drivers, exactly like carriers.
+
+**Location.** `packages/integrations/src/storage/`.
+
+**Contract.** Define in `@platform/core` (types only, so the contract is not
+owned by the integrations package):
+
+```ts
+export type StoredObject = { key: string; byteSize: number; contentType: string };
+
+export type StorageAdapter = {
+  readonly driver: string;
+  put(key: string, body: Buffer, opts: { contentType: string; cacheControl?: string }): Promise<StoredObject>;
+  get(key: string): Promise<Buffer>;
+  delete(key: string): Promise<void>;
+  exists(key: string): Promise<boolean>;
+  /** Public URL if the driver serves one; null when the app must proxy. */
+  publicUrl(key: string): string | null;
+};
+```
+
+**Drivers.**
+
+- `local` — filesystem, rooted at `MEDIA_LOCAL_ROOT` (default
+  `<repo-root>/.media`). For development. **Must reject any key that escapes the
+  root after normalisation** — path traversal here is arbitrary file write. Test
+  this explicitly with `../` and absolute-path keys.
+- `s3` — S3-compatible, driving R2, S3, MinIO and Backblaze through the same code.
+  Config from `STORAGE_ENDPOINT`, `STORAGE_REGION`, `STORAGE_BUCKET`,
+  `STORAGE_ACCESS_KEY_ID`, `STORAGE_SECRET_ACCESS_KEY`. Use `@aws-sdk/client-s3`.
+  The driver name is `s3`, not `r2`.
+
+**Selection.** `getStorage()` reads `STORAGE_DRIVER` (`local` | `s3`), defaulting
+to `local`. **In production, defaulting is forbidden**: if `NODE_ENV === "production"`
+and `STORAGE_DRIVER` is unset, throw at startup rather than silently writing a
+production catalog's images to a container-local filesystem that vanishes on
+redeploy. This is the fail-open trap from Global Constraint 12 — the safe branch
+is the default, and the unsafe one must be chosen explicitly.
+
+**Key generation.** A pure helper in `@platform/core/media`:
+
+```ts
+export function mediaStorageKey(input: { tenantId: string; checksum: string; ext: string }): string
+export function derivativeStorageKey(input: { tenantId: string; checksum: string; width: number; format: string }): string
+```
+
+Keys are tenant-prefixed (`<tenantId>/originals/<checksum>.<ext>` and
+`<tenantId>/d/<checksum>/<width>.<format>`). Tenant-prefixing is what makes a
+per-tenant bulk delete a prefix operation and makes a leaked key obviously
+cross-tenant. Reject any `ext`/`format` not in an allowlist — these end up in a
+filesystem path.
+
+**Tests.** Unit tests against the `local` driver (round-trip, overwrite, delete,
+exists, traversal rejection) and pure-function tests for key generation. Do not
+write tests requiring live S3 credentials; test the `s3` driver's key/config
+construction only.
+
+**Env.** Add every new var to `turbo.json` `globalEnv` and `.env.example`.
+
+---
+
+## Task 3: Image processing pipeline — upload endpoint and worker job
+
+**Problem.** `media` rows, the `derivatives` jsonb shape, `IMAGE_WIDTHS`, and the
+storefront's `srcset`/`sizes` rendering already exist and are already wired.
+Nothing populates them. This task builds upload → validate → store original →
+enqueue → derive → update row.
+
+Read `apps/storefront/src/lib/media.ts` first — it defines `IMAGE_WIDTHS`
+(320/480/640/960/1280/1920), the `MediaDerivative` shape
+(`{format, width, height, storageKey, byteSize}`), and the formats
+(`avif` | `webp` | `jpeg`). **The written rows must match that shape exactly**, or
+the storefront silently renders no images.
+
+**Pure logic** → `packages/core/src/media/` (client-safe, no sharp, no db):
+
+- `planDerivatives(original: {width, height}): {format, width}[]` — never upscale
+  past the original's intrinsic width, and always include the smallest width even
+  for a tiny original so `srcset` is never empty.
+- `validateUpload({mimeType, byteSize, bytes})` — allowlist `image/jpeg`,
+  `image/png`, `image/webp`, `image/avif`. **Sniff magic bytes; never trust the
+  declared Content-Type or the filename extension.** Cap at 10 MB.
+- `sha256(bytes)` for the checksum/dedupe key.
+
+**Worker job** → `apps/worker/src/jobs/process-media.ts`, plus a `media` queue in
+`apps/worker/src/queues.ts` following the existing `TenantJob` contract (payload
+carries `tenantId`; the handler's first act is `withTenant`).
+
+Uses `sharp`. It must:
+
+- `sharp(bytes, { limitInputPixels: 50_000_000 })` — an unbounded decode is a
+  decompression bomb: a 4 KB PNG can expand to gigabytes of RAM and kill the
+  worker for every tenant at once.
+- **Strip metadata by default.** Merchant phone photos carry GPS EXIF; publishing
+  a merchant's home coordinates on their product page is a privacy breach. Rotate
+  per EXIF `Orientation` *before* stripping, or portrait photos come out sideways.
+- Write derivatives via the Task 2 storage adapter, then update the `media` row to
+  `status = "ready"` with the `derivatives` array and the original's
+  `width`/`height`.
+- On failure set `status = "failed"` and `processingError`, and rethrow so BullMQ
+  records the failure. Never leave a row `pending` forever.
+
+**Upload endpoint** → `apps/console/src/app/api/media/upload/route.ts`. Session-
+authenticated (mirror the existing console API routes and
+`apps/console/src/lib/session.ts`). It must:
+
+- Resolve the tenant from the session, never from the request body.
+- Validate before storing.
+- Compute the checksum and **dedupe**: if a non-deleted `media` row already exists
+  for `(tenantId, checksum)`, return it instead of reprocessing. The unique index
+  `media_tenant_checksum_idx` is already there for this.
+- Insert the row `status = "pending"`, store the original, enqueue the job, return
+  the media id.
+
+**Tests.** Unit-test `planDerivatives` (including the no-upscale rule and the
+tiny-original case) and `validateUpload` (each allowed type by magic bytes; a
+PNG renamed `.jpg` accepted on its real type; an HTML file declared `image/png`
+rejected; an oversize file rejected). Integration-test the worker job end to end
+against Postgres and the `local` driver: a real small PNG in, `status = "ready"`
+and derivative objects actually readable back out.
+
+---
+
+## Task 4: HTML sanitiser + console product CRUD
+
+**Problem.** The PDP renders `description` as plain text deliberately: injecting
+merchant HTML unsanitised is stored XSS against that merchant's own customers, on
+a page that will later collect addresses and payments. And there is no console UI
+to create a product at all — the catalog is seed-only today.
+
+**Sanitiser** → `packages/core/src/catalog/sanitize-html.ts`, pure and client-safe,
+exported from `@platform/core/catalog`.
+
+- **Allowlist**, never a blocklist: `p, br, strong, em, u, ul, ol, li, h2, h3, h4,
+  a, blockquote`. Attributes: `href` on `a` only.
+- On `a`, permit only `http:`, `https:` and `mailto:` URLs — reject `javascript:`,
+  `data:`, and protocol-relative `//evil.com`. Force `rel="nofollow noopener"` and
+  `target="_blank"` on outbound links.
+- Strip everything else, including all `on*` handlers, `<style>`, `<script>`,
+  `<iframe>`, and comments.
+- Use a maintained library (`sanitize-html` or `dompurify` + `jsdom`) rather than a
+  hand-rolled regex parser. A regex HTML sanitiser is a CVE with a wait time.
+- **Sanitise on write, in the console**, and store the sanitised HTML. Storing raw
+  and sanitising on read means every future reader has to remember.
+
+Then let the PDP render the sanitised description as HTML.
+
+**Console CRUD** → `apps/console/src/app/products/`.
+
+- List: paginated, searchable, tenant-scoped, showing status and price.
+- Create/edit: title, slug, description (rich), status, options and the variant
+  matrix, per-variant SKU/price/stock, media attach with alt text, category and
+  collection membership.
+- Slug edits must go through the existing slug-history mechanism in
+  `@platform/core/catalog/slug.ts` so the old URL keeps permanently redirecting.
+  Do not write `url_slugs` by hand.
+- Every mutation writes an `audit_log` row (`packages/core/src/audit/`) and runs
+  inside `withTenant`.
+- Server Actions or route handlers — match whatever the console already does.
+  Validate every input with `zod` at the boundary; never trust a form field.
+
+**Tests.** Unit-test the sanitiser hard: `<script>`, `javascript:` href,
+`onerror=`, `<img src=x onerror=alert(1)>`, protocol-relative URL, nested
+malformed tags, and that permitted formatting genuinely survives. Integration-test
+create → edit → slug change → old slug still redirects.
+
+---
+
+## Task 5: Bulk CSV import/export
+
+**Problem.** A merchant onboarding with an existing catalog will not retype it.
+This is the migration path onto the platform.
+
+**Pure logic** → `packages/core/src/catalog/csv.ts` (client-safe): column mapping,
+row → product/variant parsing, and a validation pass that returns structured
+errors keyed by row number and column.
+
+**Rules.**
+
+- One row per **variant**; the product is identified by a `handle` column repeated
+  across its variant rows. This is the shape merchants export from other platforms,
+  so it is the shape that can be pasted in.
+- Prices in the CSV are **rupees** (that is what a merchant types); convert to
+  integer paise on the boundary with the existing money helpers. A price that does
+  not parse is a row error, never a silent zero — a product accidentally listed at
+  ₹0 is real money lost.
+- **Dry-run by default.** The import returns a report — created / updated /
+  skipped / errored, with per-row reasons — and only commits when explicitly
+  confirmed. Import the whole file in one transaction so a failure halfway does
+  not leave half a catalog.
+- Cap the row count and file size; stream rather than buffering the whole file.
+- Export is the exact inverse: a file exported and re-imported unchanged must be a
+  no-op. Test that round-trip explicitly.
+
+**Console UI** → upload with a preview of the dry-run report, and a download that
+streams the tenant's catalog as CSV.
+
+**Tests.** Unit-test parsing and validation against a fixture CSV including a
+malformed price, a missing required column, a duplicate SKU, and a UTF-8 BOM (Excel
+writes one, and it silently corrupts the first column name). Integration-test the
+round-trip no-op.
+
+---
+
+## Task 6: Storefront cache invalidation via an internal purge endpoint
+
+**Problem.** `apps/storefront/src/lib/catalog.ts` wraps every catalog read in
+`unstable_cache` with tags, and its own comments name tag purges as "the primary
+invalidation path". Nothing purges. That was harmless while the catalog was
+seed-only; now that the console writes, a merchant renames a product and the
+storefront keeps serving the stale description — and the stale redirect — until
+the process restarts or the 300s TTL lapses. Confirmed live.
+
+`revalidateTag` only clears the cache of the app that calls it. The console and
+the storefront are separate Next apps in separate containers, so the console
+cannot fix this from its own process.
+
+**Approach — decided by the owner: an internal purge endpoint on the storefront.**
+
+Copy the existing shared-secret pattern in
+`apps/console/src/app/api/internal/verify-domain/route.ts`. Do not invent a
+second auth scheme; read that route and mirror it.
+
+- New route on the **storefront**: `POST /api/internal/revalidate`, authenticated
+  by the same internal shared secret, taking the tags to purge and calling
+  `revalidateTag` for each.
+- The console calls it after a successful catalog write. **The call happens after
+  the transaction commits, never inside it** — a purge issued mid-transaction can
+  race a reader into re-caching the pre-commit state, which is worse than a stale
+  cache because it survives the TTL.
+- **A failed purge must not fail the merchant's write.** The row is already
+  committed and correct; the cache is stale for at most the TTL. Log it and move
+  on — do not roll back, and do not surface a 500 for a successful save.
+- Purge the tags that actually cover the write: the product, its slugs (old and
+  new on a rename), its categories and collections, and any listing tag the
+  storefront's cache keys use. Read the tag scheme in `lib/catalog.ts` rather
+  than guessing tag names — a tag that does not match purges nothing, silently.
+- The secret must be required. In production an unset secret **throws at
+  startup**, matching the fail-closed rule in Global Constraint 12. An
+  unauthenticated caller must get a 403 before any work.
+
+**Tests.** Integration-test that the endpoint rejects a bad secret and a missing
+secret, and that a valid call purges. Test that a purge failure (endpoint down)
+leaves the write committed and does not surface an error to the caller — that is
+the property most likely to regress. Verify the rename case end to end: write,
+purge, read back the new value without waiting for the TTL.
+
+---
+
+## Task 7: Serve derivatives on the storefront, and make the media checksum index unique
+
+Two independent items, both small, both owner-approved.
+
+**7a — the storefront still links full-size originals.**
+
+`apps/storefront/src/components/ProductGrid.tsx:39` renders
+`src={mediaUrl(product.imageStorageKey)}` with **no `srcSet` at all**, so every
+listing, search and home card downloads the full-size original. The PDP hero
+(`apps/storefront/src/app/[slug]/page.tsx`) and the JSON-LD `image`
+(`apps/storefront/src/lib/seo.ts`) do the same. The derivative pipeline built in
+Task 3 is therefore unused everywhere except where a PDP explicitly opts in.
+
+This is a live cost against the blueprint's §6.2 target — LCP under 2.5s on a
+mid-range Android over 4G.
+
+- Project `derivatives` into the card query alongside `imageStorageKey`. The
+  correlated-subquery and `.as(...)` aliasing traps in Global Constraints 6 both
+  apply here; `packages/core/src/catalog/queries.ts` already documents how the
+  existing hero-image projection avoids them.
+- Render with `srcSetFor` and the `SIZES` hints already in
+  `apps/storefront/src/lib/media.ts`. Use `SIZES.card` for cards and `SIZES.hero`
+  for the PDP hero — a wrong `sizes` is worse than none, because the browser picks
+  from `srcset` before layout using that hint alone.
+- **Keep the `src` fallback.** Media is `pending` until the worker finishes, and
+  `failed` media never gets derivatives; both must still render rather than
+  showing a broken image. `srcSetFor` already returns null when there are no
+  derivatives — an empty `srcset` attribute makes some browsers fetch nothing.
+- Always emit explicit `width`/`height` to prevent CLS.
+
+**Tests.** Assert a product with derivatives emits a `srcset` with the expected
+candidates, and that one with `pending`/`failed` media emits none but still
+renders a working `src`.
+
+**7b — make `media_tenant_checksum_idx` unique.**
+
+`packages/db/src/schema/catalog.ts:133` declares a plain, non-unique index. The
+checksum is what makes re-uploading the same file reuse existing derivatives
+instead of paying to process it again, so duplicate `(tenant_id, checksum)` rows
+are always a bug.
+
+- Change it to a `uniqueIndex` and generate a migration.
+- **The migration must handle pre-existing duplicates**, or it fails on any
+  database that already has them. Decide deliberately: de-duplicate first, or
+  build the index concurrently and report. Do not let it fail silently.
+- The upload route already handles the collision correctly via
+  `onConflictDoNothing` + re-select, so this is integrity hardening rather than a
+  behaviour fix. **Verify the existing dedupe and soft-delete-revive paths still
+  pass** — the unique constraint must not turn a handled case into a 500.
+
+---
+
+## Task 8: Upgrade both apps to Next 16
+
+**Problem.** Task 6 built the cross-app cache purge correctly — endpoint, shared-secret
+auth, tenant scoping, post-commit ordering and fail-soft posture are all in place and
+mutation-tested — but it is defeated by an upstream defect. In the installed
+`next@15.5.22`, `FileSystemCache.revalidateTag` reads:
+
+```js
+for (const tag of tags) {
+  if (!tagsManifest.has(tag)) {
+    tagsManifest.set(tag, Date.now());
+  }
+}
+```
+
+Once a tag is in the manifest its timestamp never updates again, so **every purge of
+that tag after the first is a silent no-op**. Because the catch-all catalog tag is in
+every purge, only the first catalog write per tenant per storefront process actually
+clears the cache; every later one waits out the 300s TTL. Verified directly in the
+installed package, and behaviourally by the Task 6 implementer.
+
+Affected 15.3.0–15.5.23. Fixed in Next 16. **The owner has chosen the upgrade.**
+
+**Scope.** Both Next apps — `apps/storefront` and `apps/console` — plus `eslint-config-next`
+and any Next-adjacent tooling pinned to the 15 line.
+
+**This is a major-version upgrade, so treat the migration guide as the source of truth**,
+not assumptions about what changed. Read Next 16's upgrade documentation and its
+codemods before editing by hand; run the official codemod if one applies.
+
+**What must still hold afterwards** — these are the properties this codebase has already
+paid for, and a silent regression in any of them is the real risk of this task:
+
+1. **`revalidateTag` must actually purge on the second and subsequent calls.** That is the
+   entire point of the upgrade. Task 6 left a `KNOWN DEFECT` characterisation test that
+   pins the *broken* behaviour and is documented to be deleted when it starts failing.
+   **Expect it to fail after the upgrade — that is success.** Replace it with a test
+   asserting the correct behaviour: purge, write, purge again, and confirm the second
+   purge is honoured.
+2. **Every storefront route stays `force-dynamic`.** Next's full-route cache is keyed by
+   pathname, **not** by Host, so statically generating `/white-shirt` would serve one
+   tenant's page on another tenant's domain. This is the single most dangerous trap in
+   the repo. Verify it explicitly after the upgrade; do not assume the annotations
+   survived.
+3. **`next build` must run with `NODE_ENV=production`.** The build scripts pipe `.env`
+   through `dotenv-cli` and override it (`dotenv -v NODE_ENV=production`), because
+   `session.ts`, `otp-delivery.ts` and the carrier registry all gate on
+   `NODE_ENV === "production"` and **fail open** — an unset value ships insecure cookies,
+   logs OTPs and exposes the `fake` carrier.
+4. **The client-safe barrel split holds.** `@platform/core/catalog` and
+   `@platform/core/media` must stay importable from client components; anything touching
+   the database, the filesystem or a native module stays behind a `/server` subpath or an
+   app-local server module. A break here surfaces as an opaque `net`/`fs`/`perf_hooks`
+   build error.
+5. **`serverExternalPackages` still covers `sharp`**, and image processing still works end
+   to end.
+6. **The tsconfig build/test split holds** — `apps/console` has `tsconfig.json` (build,
+   excludes `tests`) and `tsconfig.test.json`, so a production install without
+   devDependencies still builds. Check whether Next 16 changes the generated
+   `next-env.d.ts` in a way the shared ESLint config rejects; that has already cost this
+   project once and is currently handled by an `ignores` entry in `eslint.config.js`.
+
+**Verification.** The full gate, plus a live pass: both apps served from a production
+build, per-host catalogs correct, an unknown host still 404, a cross-tenant slug still
+404, and a console write reflected on the storefront **without waiting for the TTL** —
+which is the outcome this whole upgrade exists to produce.
+
+If the upgrade turns out to require application changes materially beyond configuration
+and imports — a rewrite of the caching layer, or of tenant resolution — **stop and report
+rather than redesigning under cover of an upgrade.**

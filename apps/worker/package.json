@@ -5,19 +5,25 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "start": "tsx src/index.ts",
-    "typecheck": "tsc --noEmit"
+    "start": "dotenv -e ../../.env -v NODE_ENV=production -- tsx src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test:integration": "vitest run --config vitest.integration.config.ts"
   },
   "dependencies": {
     "@platform/core": "workspace:*",
     "@platform/db": "workspace:*",
+    "@platform/integrations": "workspace:*",
     "bullmq": "^5.34.4",
-    "ioredis": "^5.4.1"
+    "ioredis": "^5.4.1",
+    "sharp": "^0.35.3"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
     "dotenv": "^16.4.7",
+    "dotenv-cli": "^8.0.0",
+    "postgres": "^3.4.5",
     "tsx": "^4.19.2",
-    "typescript": "^5.7.2"
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
   }
 }

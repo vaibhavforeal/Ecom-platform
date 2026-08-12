@@ -3,7 +3,7 @@ import Link from "next/link";
 import { discountPercent, formatPaise } from "@platform/core/catalog";
 import type { ProductCard } from "@platform/core/catalog/server";
 
-import { SIZES, mediaUrl } from "../lib/media";
+import { SIZES, mediaUrl, srcSetFor } from "../lib/media";
 import { paths } from "../lib/urls";
 
 /**
@@ -28,15 +28,19 @@ export function ProductCardTile({
     <li className="card">
       <Link href={paths.entity(product.slug)} className="card-link">
         {/*
-          No srcSet here: the card query returns the original's storage
-          key, not its derivative set. Listing images become responsive
-          once the media pipeline lands and the card projection carries
-          `derivatives` — see srcSetFor in lib/media.
+          `src` stays the ORIGINAL and is what renders whenever the
+          derivative set is missing — media is `pending` until the worker
+          finishes, and `failed` media never gets derivatives at all.
+          `srcSetFor` returns null rather than "" for those, and null
+          becomes undefined here so React omits the attribute entirely:
+          an EMPTY srcset makes some browsers fetch nothing, which is a
+          blank card rather than a slow one.
         */}
         <div className="card-media">
           {product.imageStorageKey ? (
             <img
               src={mediaUrl(product.imageStorageKey)}
+              srcSet={srcSetFor(product.imageDerivatives, "webp") ?? undefined}
               sizes={SIZES.card}
               alt={product.imageAlt ?? product.title}
               width={product.imageWidth ?? 600}

@@ -4,7 +4,13 @@ const config: NextConfig = {
   reactStrictMode: true,
 
   // Workspace packages ship TypeScript source, no build step.
-  transpilePackages: ["@platform/core", "@platform/db"],
+  transpilePackages: ["@platform/core", "@platform/db", "@platform/integrations"],
+
+  // Native/CJS server libraries that must not be bundled into the server
+  // chunks. sharp is native: the upload route strips EXIF from the
+  // original before it is ever stored, so it decodes here as well as in
+  // the worker.
+  serverExternalPackages: ["sharp", "bullmq", "ioredis", "@aws-sdk/client-s3"],
 
   // The console is authenticated and mutating. Nothing here is cacheable
   // and nothing here should ever be framed.

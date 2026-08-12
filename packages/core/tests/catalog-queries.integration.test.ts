@@ -28,12 +28,51 @@ const admin = postgres(migratorUrl, { max: 2, onnotice: () => {} });
 
 let tenantA: string;
 let tenantB: string;
+let tenantC: string;
 let shirtId: string;
 let categoryId: string;
 
 const SHIRT_SLUG = "q-cotton-shirt";
 const SHIRT_OLD_SLUG = "q-cotton-shirt-old";
 const CATEGORY_SLUG = "q-apparel";
+
+/**
+ * The shirt's derivative set, exactly as the worker would have written
+ * it — and deliberately NOT in the order a `srcset` needs.
+ *
+ * Three formats interleaved, and the 640px WebP stored before the 320px
+ * one, so a projection that loses the array, reorders it or drops a
+ * format cannot pass by accident. The storefront is what sorts and
+ * filters; this is the raw jsonb.
+ */
+const SHIRT_DERIVATIVES = [
+  { format: "webp", width: 640, height: 427, storageKey: "q/d/shirtsum/640.webp", byteSize: 40100 },
+  { format: "avif", width: 320, height: 214, storageKey: "q/d/shirtsum/320.avif", byteSize: 8800 },
+  { format: "webp", width: 320, height: 214, storageKey: "q/d/shirtsum/320.webp", byteSize: 12300 },
+];
+
+/**
+ * Every jsonb fixture below is bound `::text::jsonb`, never `::jsonb`.
+ *
+ * With a bare `::jsonb`, postgres.js takes the parameter type the
+ * server infers (`ParameterDescription` backfills OID 3802 into the
+ * statement), and its serializer for that OID is `JSON.stringify` — so
+ * it JSON-ENCODES the string it was handed and the column ends up
+ * holding a jsonb *string* that spells an array rather than the array.
+ *
+ * Drizzle is not saved from this by sending text: `PgJsonb`'s
+ * `mapToDriverValue` hands over exactly the same `JSON.stringify(...)`
+ * string a fixture does. What saves it is that `drizzle(client)`
+ * MUTATES the client, replacing `options.serializers["114"]` and
+ * `["3802"]` with an identity function. So the deciding factor is which
+ * client object you hold, not the encoding: this file holds a bare
+ * `postgres()` client, which still has the encoding serializers.
+ *
+ * Reading one back through Drizzle hides the damage — its jsonb decoder
+ * parses a string value — but `jsonb_build_object` nests it as a string
+ * and `parseDerivatives` then finds no derivatives at all. Casting
+ * through `text` makes the inferred type `text` and lets Postgres parse.
+ */
 
 beforeAll(async () => {
   const [plan] = await admin<{ id: string }[]>`
@@ -51,6 +90,9 @@ beforeAll(async () => {
 
   tenantA = await mkTenant("q-a-" + randomUUID().slice(0, 8));
   tenantB = await mkTenant("q-b-" + randomUUID().slice(0, 8));
+  // Its own tenant so the counts the listing tests assert on above do
+  // not have to know about these two.
+  tenantC = await mkTenant("q-c-" + randomUUID().slice(0, 8));
 
   // ── Tenant A: one full product, one draft, one archived ──
   categoryId = randomUUID();
@@ -114,6 +156,25 @@ beforeAll(async () => {
     INSERT INTO url_slugs (tenant_id, slug, entity_type, entity_id)
     VALUES (${tenantA}, 'q-archived', 'product', ${archivedId})`;
 
+  // Two gallery images, the second one first by insertion order, so
+  // "position 0" has to be honoured rather than "whatever came back".
+  const heroMediaId = randomUUID();
+  const secondMediaId = randomUUID();
+  await admin`
+    INSERT INTO media (id, tenant_id, storage_key, mime_type, byte_size, width, height,
+                       alt, status, derivatives)
+    VALUES
+      (${secondMediaId}, ${tenantA}, 'q/originals/second.jpg', 'image/jpeg', 90000, 800, 800,
+       'Folded', 'ready', ${JSON.stringify([
+         { format: "webp", width: 480, height: 480, storageKey: "q/d/second/480.webp", byteSize: 1 },
+       ])}::text::jsonb),
+      (${heroMediaId}, ${tenantA}, 'q/originals/shirtsum.jpg', 'image/jpeg', 210000, 1600, 1068,
+       'Shirt on a hanger', 'ready', ${JSON.stringify(SHIRT_DERIVATIVES)}::text::jsonb)`;
+  await admin`
+    INSERT INTO product_media (tenant_id, product_id, media_id, position) VALUES
+      (${tenantA}, ${shirtId}, ${secondMediaId}, 1),
+      (${tenantA}, ${shirtId}, ${heroMediaId},   0)`;
+
   // ── Tenant B: its own product, at a slug tenant A also uses ──
   const bProductId = randomUUID();
   await admin`
@@ -126,10 +187,51 @@ beforeAll(async () => {
     INSERT INTO product_variants
       (id, tenant_id, product_id, sku, price_paise, weight_grams)
     VALUES (${randomUUID()}, ${tenantB}, ${bProductId}, 'Q-WRENCH', 899900, 1800)`;
+
+  // ── Tenant C: the two images that have no derivatives to serve ──
+  const mkProduct = async (title: string, slug: string, sku: string) => {
+    const id = randomUUID();
+    await admin`
+      INSERT INTO products (id, tenant_id, title, status, published_at)
+      VALUES (${id}, ${tenantC}, ${title}, 'active', now())`;
+    await admin`
+      INSERT INTO url_slugs (tenant_id, slug, entity_type, entity_id)
+      VALUES (${tenantC}, ${slug}, 'product', ${id})`;
+    await admin`
+      INSERT INTO product_variants (id, tenant_id, product_id, sku, price_paise, weight_grams)
+      VALUES (${randomUUID()}, ${tenantC}, ${id}, ${sku}, 50000, 100)`;
+    return id;
+  };
+
+  // `ready`, but the derivatives column is still the column default —
+  // a row written by a backfill, a restored dump or psql. The card has
+  // an original to show and nothing to build a srcset from.
+  const underivedId = await mkProduct("Underived Photo", "q-underived", "Q-UNDERIVED");
+  const underivedMediaId = randomUUID();
+  await admin`
+    INSERT INTO media (id, tenant_id, storage_key, mime_type, byte_size, width, height, status)
+    VALUES (${underivedMediaId}, ${tenantC}, 'q/originals/plain.jpg', 'image/jpeg', 60000,
+            900, 600, 'ready')`;
+  await admin`
+    INSERT INTO product_media (tenant_id, product_id, media_id, position)
+    VALUES (${tenantC}, ${underivedId}, ${underivedMediaId}, 0)`;
+
+  // Still queued behind the worker, and one that will never finish.
+  const unprocessedId = await mkProduct("Unprocessed Photo", "q-unprocessed", "Q-UNPROCESSED");
+  const pendingMediaId = randomUUID();
+  const failedMediaId = randomUUID();
+  await admin`
+    INSERT INTO media (id, tenant_id, storage_key, mime_type, byte_size, status) VALUES
+      (${pendingMediaId}, ${tenantC}, 'q/originals/queued.jpg', 'image/jpeg', 70000, 'pending'),
+      (${failedMediaId},  ${tenantC}, 'q/originals/broken.jpg', 'image/jpeg', 70000, 'failed')`;
+  await admin`
+    INSERT INTO product_media (tenant_id, product_id, media_id, position) VALUES
+      (${tenantC}, ${unprocessedId}, ${pendingMediaId}, 0),
+      (${tenantC}, ${unprocessedId}, ${failedMediaId},  1)`;
 });
 
 afterAll(async () => {
-  await admin`DELETE FROM tenants WHERE id IN (${tenantA}, ${tenantB})`;
+  await admin`DELETE FROM tenants WHERE id IN (${tenantA}, ${tenantB}, ${tenantC})`;
   await admin.end({ timeout: 5 });
   await closeConnections();
 });
@@ -224,6 +326,49 @@ describe("listProducts", () => {
     const page = await listProducts(tenantA, { limit: 1, offset: 5 });
     expect(page.items).toEqual([]);
     expect(page.total).toBe(1); // total is of the whole result set
+  });
+
+  it("projects the position-0 image with its derivatives", async () => {
+    // The card is the whole point of the derivative ladder: without
+    // this column every listing downloads the full-size original at
+    // every breakpoint. And the two ways this SQL fails are silent —
+    // an interpolated correlated reference or a missing `.as()` alias
+    // both come back NULL with no error — so the assertion is on the
+    // VALUE, never on "it is defined".
+    const { items } = await listProducts(tenantA);
+    const card = items[0];
+
+    expect(card?.imageStorageKey).toBe("q/originals/shirtsum.jpg");
+    expect(card?.imageAlt).toBe("Shirt on a hanger");
+    expect(card?.imageWidth).toBe(1600);
+    expect(card?.imageHeight).toBe(1068);
+    // Order preserved, every format carried, nothing invented.
+    expect(card?.imageDerivatives).toEqual(SHIRT_DERIVATIVES);
+  });
+
+  it("carries an empty derivative set rather than the other image's", async () => {
+    // `ready` with the column at its default. The card still has an
+    // original to render; there is simply no srcset to build.
+    const { items } = await listProducts(tenantC);
+    const card = items.find((i) => i.title === "Underived Photo");
+
+    expect(card?.imageStorageKey).toBe("q/originals/plain.jpg");
+    expect(card?.imageWidth).toBe(900);
+    expect(card?.imageHeight).toBe(600);
+    expect(card?.imageDerivatives).toEqual([]);
+  });
+
+  it("shows no image for a product whose media is still pending or failed", async () => {
+    // Unprocessed media is not published: the card falls back to the
+    // empty placeholder rather than linking bytes the pipeline has not
+    // finished with. Pinned because it is the other half of the
+    // "no derivatives" story — see ProductGrid.
+    const { items } = await listProducts(tenantC);
+    const card = items.find((i) => i.title === "Unprocessed Photo");
+
+    expect(card).toBeDefined();
+    expect(card?.imageStorageKey).toBeNull();
+    expect(card?.imageDerivatives).toBeNull();
   });
 });
 

@@ -1,0 +1,2 @@
+ALTER TABLE "tenants" ADD COLUMN "search_indexing" text DEFAULT 'auto' NOT NULL;--> statement-breakpoint
+ALTER TABLE "tenants" ADD CONSTRAINT "tenants_search_indexing_check" CHECK ("tenants"."search_indexing" IN ('auto', 'indexed', 'noindex'));
