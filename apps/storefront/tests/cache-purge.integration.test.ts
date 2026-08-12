@@ -29,6 +29,13 @@ import { installNextDataCache, runDynamicRender, runRouteHandler } from "./next-
  * option does exactly that — the middle assertion fails loudly instead
  * of every test passing for the wrong reason.
  *
+ * And every "the visitor now sees the new value" read goes through
+ * `renderProduct` / `renderSlug`, which run inside a work store the way
+ * a dynamic render does. A bare `await getCachedProduct()` recomputes a
+ * stale entry synchronously and returns fresh data, so a purge that only
+ * marks a tag STALE rather than expiring it passes a bare-read test and
+ * ships the old page. That distinction is this branch's whole subject.
+ *
  * The 300s TTL is never waited on. Each test finishes in milliseconds,
  * so a value that changes can only have changed because of a purge.
  *
@@ -76,6 +83,42 @@ function purgeRequest(tenantId: string, tags: unknown, secret: string | null): R
 
 function purge(tenantId: string, tags: unknown, secret: string | null = TEST_SECRET) {
   return runRouteHandler(() => revalidateRoute(purgeRequest(tenantId, tags, secret)));
+}
+
+/**
+ * The two reads a page render does, run the way a render runs them.
+ *
+ * NOT ceremony, and not interchangeable with `await getCachedProduct()`.
+ * A bare call runs OUTSIDE a work store, where `unstable_cache`
+ * recomputes a stale entry SYNCHRONOUSLY and hands back fresh data; a
+ * real dynamic render runs inside one, where a stale entry is served to
+ * the visitor as-is. So a purge that only marks a tag `stale` —
+ * `revalidateTag(tag, "max")`, or any `{ expire: n > 0 }` — passes a
+ * bare-read assertion while shipping the old page. Every "the visitor
+ * now sees the new value" assertion below goes through these.
+ * `next-cache-harness.ts` has the measurements.
+ */
+function renderProduct(tenantId: string, productId: string) {
+  return runDynamicRender(() => getCachedProduct(tenantId, productId));
+}
+
+function renderSlug(tenantId: string, slug: string) {
+  return runDynamicRender(() => getCachedSlugResolution(tenantId, slug));
+}
+
+/**
+ * The gap between a purge and the read that checks it.
+ *
+ * `areTagsExpired` compares an `expiredAt` written from `Date.now()`
+ * against `performance.timeOrigin + performance.now()` — two clocks,
+ * offset per process by up to ~0.7ms — so a read issued in the same
+ * instant as a purge can still see the entry. Measured at 70% of the
+ * time in the worst case. Unreachable in production, where a purge
+ * arrives over HTTP and the next visitor is a network round trip
+ * behind; reachable only in a same-process test. See the harness note.
+ */
+function afterPurgeSettles(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 25));
 }
 
 async function makeTenant(): Promise<string> {
@@ -178,7 +221,8 @@ describe("POST /api/internal/revalidate — the cache actually empties", () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ purged: 1 });
 
-    expect((await getCachedProduct(tenantId, productId))?.title).toBe("Should Stay Hidden");
+    await afterPurgeSettles();
+    expect((await renderProduct(tenantId, productId))?.title).toBe("Should Stay Hidden");
   });
 
   it("clears the old slug's answer and the new one together, which is the rename case", async () => {
@@ -187,7 +231,7 @@ describe("POST /api/internal/revalidate — the cache actually empties", () => {
 
     // A real page render does exactly these reads: resolve the slug,
     // then load the product.
-    await expect(getCachedSlugResolution(tenantId, "classic-cotton-shirt")).resolves.toEqual({
+    await expect(renderSlug(tenantId, "classic-cotton-shirt")).resolves.toEqual({
       action: "render",
       entityType: "product",
       entityId: productId,
@@ -197,7 +241,7 @@ describe("POST /api/internal/revalidate — the cache actually empties", () => {
     // link that has not gone live yet is enough to put this entry in.
     // It is the half of the rename bug that is easy to forget: without
     // it the renamed product 404s on its own new URL for the whole TTL.
-    await expect(getCachedSlugResolution(tenantId, "classic-oxford-shirt")).resolves.toEqual({
+    await expect(renderSlug(tenantId, "classic-oxford-shirt")).resolves.toEqual({
       action: "notFound",
     });
 
@@ -210,12 +254,12 @@ describe("POST /api/internal/revalidate — the cache actually empties", () => {
       VALUES (${tenantId}, 'classic-oxford-shirt', 'product', ${productId}, true)`;
 
     // Still the old answers — the cache has not noticed a thing.
-    await expect(getCachedSlugResolution(tenantId, "classic-cotton-shirt")).resolves.toEqual({
+    await expect(renderSlug(tenantId, "classic-cotton-shirt")).resolves.toEqual({
       action: "render",
       entityType: "product",
       entityId: productId,
     });
-    await expect(getCachedSlugResolution(tenantId, "classic-oxford-shirt")).resolves.toEqual({
+    await expect(renderSlug(tenantId, "classic-oxford-shirt")).resolves.toEqual({
       action: "notFound",
     });
 
@@ -230,21 +274,23 @@ describe("POST /api/internal/revalidate — the cache actually empties", () => {
     ]);
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ purged: 4 });
+    await afterPurgeSettles();
 
     // Well inside the 300s TTL — this test takes milliseconds — so
-    // these can only have changed because of the purge.
-    expect((await getCachedProduct(tenantId, productId))?.title).toBe("Classic Oxford Shirt");
+    // these can only have changed because of the purge, and because it
+    // EXPIRED the entries rather than marking them stale.
+    expect((await renderProduct(tenantId, productId))?.title).toBe("Classic Oxford Shirt");
 
     // The OLD url redirects instead of rendering. This is the half of
     // the bug that outlived a restart in the live check on 2026-08-12.
-    await expect(getCachedSlugResolution(tenantId, "classic-cotton-shirt")).resolves.toEqual({
+    await expect(renderSlug(tenantId, "classic-cotton-shirt")).resolves.toEqual({
       action: "redirect",
       to: "classic-oxford-shirt",
       permanent: true,
     });
 
     // And the new url, whose cached 404 is gone.
-    await expect(getCachedSlugResolution(tenantId, "classic-oxford-shirt")).resolves.toEqual({
+    await expect(renderSlug(tenantId, "classic-oxford-shirt")).resolves.toEqual({
       action: "render",
       entityType: "product",
       entityId: productId,
@@ -390,7 +436,7 @@ describe("POST /api/internal/revalidate — every purge of a tag counts, not jus
     const tenantId = await makeTenant();
     const { productId } = await makeProduct(tenantId, "Title 0");
 
-    const render = () => runDynamicRender(() => getCachedProduct(tenantId, productId));
+    const render = () => renderProduct(tenantId, productId);
 
     expect((await render())?.title).toBe("Title 0");
 
@@ -401,7 +447,7 @@ describe("POST /api/internal/revalidate — every purge of a tag counts, not jus
       // Next's manifest stores whole milliseconds, so the cached entry
       // has to land in an earlier millisecond than the purge for this to
       // be testing the manifest rather than a clock tie.
-      await new Promise((resolve) => setTimeout(resolve, 25));
+      await afterPurgeSettles();
       await admin`UPDATE products SET title = ${next} WHERE id = ${productId}`;
 
       // Still serving the old row. Without this the whole loop would
@@ -410,18 +456,11 @@ describe("POST /api/internal/revalidate — every purge of a tag counts, not jus
 
       expect((await purge(tenantId, [`t:${tenantId}:catalog`])).status).toBe(200);
 
-      // The SECOND clock tie, and it is not the same as the one above.
-      // `areTagsExpired` reads `expiredAt <= performance.timeOrigin +
-      // performance.now()`, but `expiredAt` was written from
-      // `Date.now()`. Those are two different clocks, and the
-      // performance clock in a worker here runs up to ~0.7ms BEHIND the
-      // wall clock — measured, and it varies per process. So for under a
-      // millisecond after a purge the entry can still read as
-      // not-expired: `areTagsExpired` came back false 70% of the time
-      // when called in the same instant as the purge. Without this gap
-      // the test fails about 30% of runs, at whichever round loses the
-      // race. See the note in `next-cache-harness.ts`.
-      await new Promise((resolve) => setTimeout(resolve, 25));
+      // The SECOND clock tie, and it is not the same as the one above:
+      // this one is the `Date.now()` / `performance.now()` mismatch
+      // `afterPurgeSettles` documents. Without it the test fails about
+      // 30% of runs, at whichever round loses the race.
+      await afterPurgeSettles();
 
       // The next visitor. Well inside the 300s TTL — the whole test
       // takes milliseconds — so this can only have changed because the
