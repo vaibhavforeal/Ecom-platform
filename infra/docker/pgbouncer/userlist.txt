@@ -1,0 +1,14 @@
+; DEVELOPMENT ONLY.
+;
+; Plaintext passwords here let PgBouncer perform SCRAM authentication
+; onward to PostgreSQL. That is fine on a laptop and unacceptable in
+; production, where this file is generated from secrets at deploy time
+; and never committed.
+;
+; Production checklist:
+;   · generate from the secret store, mode 0600, owned by the pgbouncer user
+;   · rotate alongside the database passwords
+;   · never bake into an image layer
+
+"app_user" "app_user_dev_pw"
+"app_migrator" "app_migrator_dev_pw"

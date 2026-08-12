@@ -1,0 +1,32 @@
+{
+  "name": "@platform/core",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./identity": "./src/identity/index.ts",
+    "./tenancy": "./src/tenancy/index.ts",
+    "./audit": "./src/audit/index.ts",
+    "./catalog": "./src/catalog/index.ts",
+    "./catalog/server": "./src/catalog/server.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:integration": "vitest run --config vitest.integration.config.ts"
+  },
+  "dependencies": {
+    "@platform/db": "workspace:*",
+    "ioredis": "^5.4.1",
+    "uuid": "^11.0.3",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "dotenv": "^16.4.7",
+    "postgres": "^3.4.5",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

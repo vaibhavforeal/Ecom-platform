@@ -1,0 +1,282 @@
+:root {
+  --bg: #ffffff;
+  --text: #14181d;
+  --muted: #6b7280;
+  --border: #e5e7eb;
+  --panel: #f9fafb;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: 16px;
+  line-height: 1.6;
+}
+
+main {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 64px 24px;
+}
+
+h1 {
+  font-size: 30px;
+  margin: 0 0 6px;
+  letter-spacing: -0.02em;
+}
+
+.tagline {
+  margin: 0;
+  color: var(--muted);
+  font-size: 18px;
+}
+
+.muted {
+  color: var(--muted);
+  font-size: 14px;
+  margin: 0 0 16px;
+}
+
+.panel {
+  margin-top: 32px;
+  padding: 20px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+dl {
+  display: grid;
+  grid-template-columns: 160px 1fr;
+  gap: 6px 16px;
+  margin: 0;
+  font-size: 14px;
+}
+
+dt {
+  color: var(--muted);
+}
+
+dd {
+  margin: 0;
+}
+
+code {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 13px;
+}
+
+/* ── Catalog ───────────────────────────────────────────────── */
+
+main {
+  max-width: 1040px;
+}
+
+h2 {
+  font-size: 20px;
+  margin: 40px 0 16px;
+  letter-spacing: -0.01em;
+}
+
+.grid {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 28px 20px;
+}
+
+.card-link {
+  color: inherit;
+  text-decoration: none;
+  display: block;
+}
+
+/*
+  A fixed aspect ratio reserves the space before the image arrives.
+  Together with the width/height attributes on every <img>, this is what
+  keeps CLS at zero — the layout never moves as images load.
+*/
+.card-media {
+  aspect-ratio: 1 / 1;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  margin-bottom: 10px;
+}
+
+.card-media img,
+.card-media-empty {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.card-title {
+  font-size: 15px;
+  font-weight: 500;
+  margin: 0 0 4px;
+}
+
+.card-price {
+  margin: 0;
+  font-size: 14px;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.price {
+  font-weight: 600;
+}
+
+.compare-at {
+  color: var(--muted);
+}
+
+.discount {
+  color: #047857;
+  font-size: 13px;
+}
+
+/* ── Chips and breadcrumbs ─────────────────────────────────── */
+
+.chips {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 20px 0;
+  padding: 0;
+}
+
+.chip {
+  display: inline-block;
+  padding: 6px 14px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg);
+  color: inherit;
+  font: inherit;
+  font-size: 14px;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.chip[aria-pressed="true"] {
+  border-color: var(--text);
+  background: var(--text);
+  color: var(--bg);
+}
+
+/*
+  Unreachable combinations are shown disabled, never hidden: a shopper
+  who cannot see "XL" concludes the store does not stock it.
+*/
+.chip:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  text-decoration: line-through;
+}
+
+.breadcrumbs {
+  font-size: 14px;
+  color: var(--muted);
+  margin-bottom: 20px;
+}
+
+.breadcrumbs a {
+  color: inherit;
+}
+
+.pagination {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-top: 40px;
+  font-size: 14px;
+}
+
+/* ── Product detail ────────────────────────────────────────── */
+
+.pdp {
+  max-width: 640px;
+}
+
+.pdp-hero {
+  width: 100%;
+  height: auto;
+  aspect-ratio: 1 / 1;
+  object-fit: cover;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  margin-bottom: 24px;
+}
+
+.axis {
+  border: 0;
+  padding: 0;
+  margin: 0 0 16px;
+}
+
+.axis legend {
+  font-size: 13px;
+  color: var(--muted);
+  padding: 0;
+  margin-bottom: 8px;
+}
+
+.axis-values {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.variant-picker {
+  margin: 24px 0;
+}
+
+.selected-variant {
+  margin: 16px 0 0;
+  font-size: 15px;
+}
+
+.prose p {
+  margin: 0 0 12px;
+}
+
+/* ── Search ────────────────────────────────────────────────── */
+
+form[role="search"] {
+  display: flex;
+  gap: 8px;
+  margin: 20px 0;
+}
+
+form[role="search"] input {
+  flex: 1;
+  padding: 10px 14px;
+  font: inherit;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+form[role="search"] button {
+  padding: 10px 20px;
+  font: inherit;
+  border: 1px solid var(--text);
+  border-radius: 8px;
+  background: var(--text);
+  color: var(--bg);
+  cursor: pointer;
+}

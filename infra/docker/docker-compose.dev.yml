@@ -1,0 +1,85 @@
+name: platform-dev
+
+# Local development infrastructure.
+#
+# The Next.js apps and the worker run on the HOST (`pnpm dev`), not in
+# containers — faster HMR, and a debugger that attaches without ceremony.
+# What runs here is the stateful infrastructure that must match
+# production behaviour, PgBouncer included: transaction pooling changes
+# how `SET LOCAL` and prepared statements behave, and discovering that
+# in production is the wrong time.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: platform-postgres
+    environment:
+      POSTGRES_DB: platform
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres_dev_pw
+      APP_DB_USER: app_user
+      APP_DB_PASSWORD: app_user_dev_pw
+      MIGRATOR_DB_USER: app_migrator
+      MIGRATOR_DB_PASSWORD: app_migrator_dev_pw
+      # SCRAM matches production; PgBouncer passes it through using the
+      # plaintext entries in userlist.txt.
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
+    ports:
+      # Deliberately off the default port. Developers commonly have another
+      # Postgres on 5432; colliding with it makes `infra:up` fail in a way
+      # that looks like a bug in this repo.
+      - "5442:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d platform"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    command:
+      - postgres
+      - -c
+      - max_connections=200
+      - -c
+      - log_min_duration_statement=200 # surface slow queries early
+
+  pgbouncer:
+    image: edoburu/pgbouncer:latest
+    container_name: platform-pgbouncer
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "6442:6432"
+    volumes:
+      - ./pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
+      - ./pgbouncer/userlist.txt:/etc/pgbouncer/userlist.txt:ro
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 6432 || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: platform-redis
+    ports:
+      - "6389:6379"
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      # Sessions and rate-limit windows are recoverable; queue jobs are
+      # not. AOF keeps BullMQ honest across a restart.
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:
+  redisdata:

@@ -1,0 +1,39 @@
+{
+  "$schema": "https://turbo.build/schema.json",
+  "globalEnv": [
+    "NODE_ENV",
+    "DATABASE_URL_APP",
+    "DATABASE_URL_MIGRATOR",
+    "REDIS_URL",
+    "OTP_PEPPER",
+    "SESSION_SECRET",
+    "PLATFORM_DOMAIN",
+    "STOREFRONT_ROOT_DOMAIN",
+    "CONSOLE_ORIGIN",
+    "CREDENTIALS_MASTER_KEY",
+    "CUSTOM_DOMAIN_CNAME_TARGET",
+    "CUSTOM_DOMAIN_A_RECORDS",
+    "MEDIA_PUBLIC_BASE_URL"
+  ],
+  "tasks": {
+    "dev": {
+      "cache": false,
+      "persistent": true
+    },
+    "build": {
+      "dependsOn": ["^build"],
+      "outputs": [".next/**", "!.next/cache/**", "dist/**"]
+    },
+    "lint": {},
+    "typecheck": {
+      "dependsOn": ["^typecheck"]
+    },
+    "test": {
+      "outputs": []
+    },
+    "test:integration": {
+      "cache": false,
+      "outputs": []
+    }
+  }
+}

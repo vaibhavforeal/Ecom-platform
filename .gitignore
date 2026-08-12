@@ -1,0 +1,26 @@
+node_modules/
+.pnpm-store/
+.turbo/
+dist/
+.next/
+out/
+coverage/
+
+.env
+.env.*
+!.env.example
+
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# Session transcript dumps — machine-generated, and they quote .env contents.
+/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]-*.txt
+.remember/
+
+.DS_Store
+Thumbs.db
+
+infra/docker/data/
+infra/caddy/data/
+infra/caddy/config/

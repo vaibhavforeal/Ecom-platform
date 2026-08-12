@@ -1,0 +1,128 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DATABASE_URL_MIGRATOR: postgres://app_migrator:app_migrator_dev_pw@localhost:5432/platform
+  DATABASE_URL_APP: postgres://app_user:app_user_dev_pw@localhost:5432/platform
+  REDIS_URL: redis://localhost:6379
+  OTP_PEPPER: ci_pepper_at_least_32_characters_long_xxxxxxxx
+  SESSION_SECRET: ci_secret_at_least_32_characters_long_xxxxxxx
+  STOREFRONT_ROOT_DOMAIN: localhost:3000
+  CREDENTIALS_MASTER_KEY: Y2lfb25seV9tYXN0ZXJfa2V5XzMyX2J5dGVzX29rISE=
+
+jobs:
+  static:
+    name: Typecheck & lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm lint
+
+  unit:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test
+
+  # ───────────────────────────────────────────────────────────────
+  # The gate that matters.
+  #
+  # This job asserts that no tenant can read, write or otherwise reach
+  # another tenant's data, and that every table in the schema has been
+  # deliberately classified as tenant-scoped or platform-scoped.
+  #
+  # It is a required status check. If it is ever made non-blocking, or a
+  # test in it is skipped to get a build green, the multi-tenancy
+  # guarantee stops being a guarantee — and the Phase 2 commercial plan
+  # rests entirely on it holding.
+  # ───────────────────────────────────────────────────────────────
+  isolation:
+    name: Tenant isolation (required)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: platform
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres_dev_pw
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres -d platform"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm }
+
+      - run: pnpm install --frozen-lockfile
+
+      # The GitHub service container cannot run our init scripts, so the
+      # roles are provisioned here. Same definitions as
+      # infra/docker/postgres/init/01-roles.sh — app_user gets no
+      # BYPASSRLS and owns nothing, which the suite verifies directly.
+      - name: Provision database roles
+        env:
+          PGPASSWORD: postgres_dev_pw
+        run: |
+          psql -h localhost -U postgres -d platform -v ON_ERROR_STOP=1 <<'SQL'
+            CREATE ROLE app_migrator LOGIN PASSWORD 'app_migrator_dev_pw' BYPASSRLS;
+            CREATE ROLE app_user     LOGIN PASSWORD 'app_user_dev_pw';
+            GRANT ALL ON DATABASE platform TO app_migrator;
+            ALTER SCHEMA public OWNER TO app_migrator;
+            GRANT USAGE ON SCHEMA public TO app_user;
+            ALTER DEFAULT PRIVILEGES FOR ROLE app_migrator IN SCHEMA public
+              GRANT USAGE, SELECT ON SEQUENCES TO app_user;
+            REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+            REVOKE CREATE ON SCHEMA public FROM app_user;
+          SQL
+
+      - run: pnpm db:generate
+      - run: pnpm db:migrate
+
+      - name: Tenant isolation suite
+        run: pnpm test:integration
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    needs: [static]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build

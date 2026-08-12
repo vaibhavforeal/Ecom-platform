@@ -1,0 +1,91 @@
+# Production reverse proxy.
+#
+# The interesting part is on-demand TLS. When a merchant points
+# shop.theirbrand.com at us, Caddy must obtain a certificate for a domain
+# we do not control, automatically, with no deploy and no ops ticket.
+# That is what makes self-serve custom domains possible at all.
+#
+# See PLATFORM_BLUEPRINT.md §2.4.
+
+{
+	email ops@platform.in
+
+	on_demand_tls {
+		# THE SECURITY GATE.
+		#
+		# Caddy calls this before issuing a certificate for any hostname
+		# it has not seen. The endpoint returns 200 only for hostnames
+		# that exist in our `domains` table AND have passed DNS
+		# verification.
+		#
+		# Without this check, anyone can point a DNS record at our IP and
+		# drive certificate issuance until Let's Encrypt rate-limits the
+		# account — taking custom domains down for every tenant. This is
+		# a known, actively exploited failure mode, not a theoretical one.
+		ask http://console:3001/api/internal/verify-domain
+
+		# Second layer: even authorised issuance is throttled, so a
+		# compromised or buggy ask endpoint cannot cause a stampede.
+		interval 2m
+		burst 5
+	}
+
+	servers {
+		# Caddy terminates TLS; apps read the original host from here.
+		trusted_proxies static private_ranges
+	}
+}
+
+# ── Merchant console ────────────────────────────────────────────
+console.platform.in {
+	reverse_proxy console:3001 {
+		header_up X-Forwarded-Host {host}
+		header_up X-Real-IP {remote_host}
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		X-Frame-Options "DENY"
+		X-Content-Type-Options "nosniff"
+		-Server
+	}
+}
+
+# ── Internal endpoints must never be publicly reachable ─────────
+# The ask endpoint is called by Caddy over the private Docker network.
+# This block makes sure it cannot be reached from the internet.
+console.platform.in/api/internal/* {
+	respond 404
+}
+
+# ── Free per-tenant subdomains ──────────────────────────────────
+*.shops.platform.in {
+	tls {
+		dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+	}
+
+	reverse_proxy storefront:3000 {
+		header_up X-Forwarded-Host {host}
+		header_up X-Real-IP {remote_host}
+	}
+}
+
+# ── Merchant custom domains ─────────────────────────────────────
+# Catch-all. Reached only after the ask endpoint authorises the host,
+# so an unknown hostname never gets a certificate and never gets here.
+:443 {
+	tls {
+		on_demand
+	}
+
+	reverse_proxy storefront:3000 {
+		header_up X-Forwarded-Host {host}
+		header_up X-Real-IP {remote_host}
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		-Server
+	}
+}

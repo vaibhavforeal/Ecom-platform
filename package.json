@@ -1,0 +1,35 @@
+{
+  "name": "ecommerce-platform",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@9.12.0",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "lint": "eslint .",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "test:integration": "turbo run test:integration",
+    "infra:up": "docker compose -f infra/docker/docker-compose.dev.yml up -d",
+    "infra:down": "docker compose -f infra/docker/docker-compose.dev.yml down",
+    "infra:logs": "docker compose -f infra/docker/docker-compose.dev.yml logs -f",
+    "infra:nuke": "docker compose -f infra/docker/docker-compose.dev.yml down -v",
+    "db:generate": "pnpm --filter @platform/db generate",
+    "db:migrate": "pnpm --filter @platform/db migrate",
+    "db:seed": "pnpm --filter @platform/db seed",
+    "db:studio": "pnpm --filter @platform/db studio",
+    "bootstrap": "pnpm install && pnpm infra:up && sleep 5 && pnpm db:generate && pnpm db:migrate && pnpm db:seed"
+  },
+  "devDependencies": {
+    "@platform/config": "workspace:*",
+    "@types/node": "^22.10.2",
+    "eslint": "^9.17.0",
+    "turbo": "^2.3.3",
+    "typescript": "^5.7.2",
+    "typescript-eslint": "^8.18.1",
+    "vitest": "^2.1.8"
+  }
+}
