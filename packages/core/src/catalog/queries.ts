@@ -49,6 +49,16 @@ export type ProductCard = {
   imageAlt: string | null;
   imageWidth: number | null;
   imageHeight: number | null;
+  /**
+   * The image's `derivatives` jsonb, for the storefront's `srcset`.
+   *
+   * `unknown` rather than a derivative array because nothing in the
+   * database constrains the shape of a jsonb column — the storefront's
+   * `parseDerivatives` is what turns it into records, and it drops
+   * anything that does not look like one. Same reason
+   * `ProductDetail.images[].derivatives` is `unknown`.
+   */
+  imageDerivatives: unknown;
 };
 
 export type ProductDetail = {
@@ -184,6 +194,7 @@ type CardImage = {
   alt: string | null;
   width: number | null;
   height: number | null;
+  derivatives: unknown;
 } | null;
 
 /**
@@ -217,13 +228,26 @@ const cheapestVariant = sql<CheapestVariant>`
  * Width and height come along because the storefront must emit explicit
  * dimensions on every image — unsized images are the easiest way to
  * fail the CLS budget in blueprint §6.2, and it cannot be fixed in CSS.
+ *
+ * `derivatives` rides along in the SAME jsonb object rather than in a
+ * second subquery: it belongs to the row this one already located, and
+ * a card without it is a card that downloads the full-size original at
+ * every breakpoint. It is carried as raw jsonb — the storefront parses
+ * it — so nothing here has to agree with the ladder the pipeline wrote.
+ *
+ * Both silent-NULL traps are avoided the same way the price projection
+ * above avoids them: the correlated reference is the written-out
+ * `OUTER_PRODUCT_ID` fragment rather than an interpolated Drizzle
+ * column, and the whole fragment is `.as()`-aliased. Get either wrong
+ * and this comes back NULL for every row, with no error to notice.
  */
 const cardImage = sql<CardImage>`
   (SELECT jsonb_build_object(
-            'storageKey', m.storage_key,
-            'alt',        m.alt,
-            'width',      m.width,
-            'height',     m.height)
+            'storageKey',  m.storage_key,
+            'alt',         m.alt,
+            'width',       m.width,
+            'height',      m.height,
+            'derivatives', m.derivatives)
      FROM product_media pm
      JOIN media m ON m.id = pm.media_id
     WHERE pm.product_id = ${OUTER_PRODUCT_ID}
@@ -339,6 +363,7 @@ export async function listProducts(
             imageAlt: r.image?.alt ?? null,
             imageWidth: r.image?.width ?? null,
             imageHeight: r.image?.height ?? null,
+            imageDerivatives: r.image?.derivatives ?? null,
           },
         ];
       }),

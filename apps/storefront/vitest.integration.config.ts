@@ -18,6 +18,12 @@ config({ path: resolve(import.meta.dirname, "../../.env") });
  * behind it — are process-global.
  */
 export default defineConfig({
+  // `tsconfig.json` sets `jsx: preserve`, because Next owns that
+  // transform in a real build. Vitest has no such step, so a component
+  // rendered in a test would compile to the classic `React.createElement`
+  // and fail on a `React` that App Router files never import. The
+  // automatic runtime is what Next itself uses.
+  esbuild: { jsx: "automatic" },
   test: {
     include: ["tests/**/*.integration.test.ts"],
     fileParallelism: false,
