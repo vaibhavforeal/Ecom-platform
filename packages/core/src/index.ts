@@ -7,3 +7,4 @@ export * from "./crypto/index";
 export * from "./logistics/index";
 export * from "./catalog/index";
 export * from "./catalog/server";
+export * from "./media/index";
