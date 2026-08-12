@@ -422,3 +422,76 @@ are always a bug.
   `onConflictDoNothing` + re-select, so this is integrity hardening rather than a
   behaviour fix. **Verify the existing dedupe and soft-delete-revive paths still
   pass** — the unique constraint must not turn a handled case into a 500.
+
+---
+
+## Task 8: Upgrade both apps to Next 16
+
+**Problem.** Task 6 built the cross-app cache purge correctly — endpoint, shared-secret
+auth, tenant scoping, post-commit ordering and fail-soft posture are all in place and
+mutation-tested — but it is defeated by an upstream defect. In the installed
+`next@15.5.22`, `FileSystemCache.revalidateTag` reads:
+
+```js
+for (const tag of tags) {
+  if (!tagsManifest.has(tag)) {
+    tagsManifest.set(tag, Date.now());
+  }
+}
+```
+
+Once a tag is in the manifest its timestamp never updates again, so **every purge of
+that tag after the first is a silent no-op**. Because the catch-all catalog tag is in
+every purge, only the first catalog write per tenant per storefront process actually
+clears the cache; every later one waits out the 300s TTL. Verified directly in the
+installed package, and behaviourally by the Task 6 implementer.
+
+Affected 15.3.0–15.5.23. Fixed in Next 16. **The owner has chosen the upgrade.**
+
+**Scope.** Both Next apps — `apps/storefront` and `apps/console` — plus `eslint-config-next`
+and any Next-adjacent tooling pinned to the 15 line.
+
+**This is a major-version upgrade, so treat the migration guide as the source of truth**,
+not assumptions about what changed. Read Next 16's upgrade documentation and its
+codemods before editing by hand; run the official codemod if one applies.
+
+**What must still hold afterwards** — these are the properties this codebase has already
+paid for, and a silent regression in any of them is the real risk of this task:
+
+1. **`revalidateTag` must actually purge on the second and subsequent calls.** That is the
+   entire point of the upgrade. Task 6 left a `KNOWN DEFECT` characterisation test that
+   pins the *broken* behaviour and is documented to be deleted when it starts failing.
+   **Expect it to fail after the upgrade — that is success.** Replace it with a test
+   asserting the correct behaviour: purge, write, purge again, and confirm the second
+   purge is honoured.
+2. **Every storefront route stays `force-dynamic`.** Next's full-route cache is keyed by
+   pathname, **not** by Host, so statically generating `/white-shirt` would serve one
+   tenant's page on another tenant's domain. This is the single most dangerous trap in
+   the repo. Verify it explicitly after the upgrade; do not assume the annotations
+   survived.
+3. **`next build` must run with `NODE_ENV=production`.** The build scripts pipe `.env`
+   through `dotenv-cli` and override it (`dotenv -v NODE_ENV=production`), because
+   `session.ts`, `otp-delivery.ts` and the carrier registry all gate on
+   `NODE_ENV === "production"` and **fail open** — an unset value ships insecure cookies,
+   logs OTPs and exposes the `fake` carrier.
+4. **The client-safe barrel split holds.** `@platform/core/catalog` and
+   `@platform/core/media` must stay importable from client components; anything touching
+   the database, the filesystem or a native module stays behind a `/server` subpath or an
+   app-local server module. A break here surfaces as an opaque `net`/`fs`/`perf_hooks`
+   build error.
+5. **`serverExternalPackages` still covers `sharp`**, and image processing still works end
+   to end.
+6. **The tsconfig build/test split holds** — `apps/console` has `tsconfig.json` (build,
+   excludes `tests`) and `tsconfig.test.json`, so a production install without
+   devDependencies still builds. Check whether Next 16 changes the generated
+   `next-env.d.ts` in a way the shared ESLint config rejects; that has already cost this
+   project once and is currently handled by an `ignores` entry in `eslint.config.js`.
+
+**Verification.** The full gate, plus a live pass: both apps served from a production
+build, per-host catalogs correct, an unknown host still 404, a cross-tenant slug still
+404, and a console write reflected on the storefront **without waiting for the TTL** —
+which is the outcome this whole upgrade exists to produce.
+
+If the upgrade turns out to require application changes materially beyond configuration
+and imports — a rewrite of the caching layer, or of tenant resolution — **stop and report
+rather than redesigning under cover of an upgrade.**
