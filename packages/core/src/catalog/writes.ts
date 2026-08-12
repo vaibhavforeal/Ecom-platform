@@ -71,17 +71,17 @@ export type CatalogIssue = {
  * product one error per save is a merchant who stops using the console.
  */
 export class CatalogValidationError extends AppError {
-  readonly issues: CatalogIssue[];
-
   constructor(issues: CatalogIssue[]) {
     super({
       code: "catalog_invalid",
+      // The internal message names the paths for the log; `details` is
+      // what crosses the wire, and it is safe to — every string in it
+      // was written here, not echoed from the payload.
       message: `Catalog payload rejected: ${issues.map((i) => `${i.path}: ${i.message}`).join("; ")}`,
       status: 422,
       publicMessage: "Some fields need attention.",
       details: { issues },
     });
-    this.issues = issues;
   }
 }
 
@@ -284,12 +284,12 @@ export async function setCanonicalSlug(
  * key is validated by PostgreSQL as the table owner, which bypasses row
  * security, so the insert would succeed and nothing would look wrong.
  */
-async function assertVisible(
+function assertVisible(
   found: { id: string }[],
   requested: string[],
   path: string,
   label: string,
-): Promise<void> {
+): void {
   if (requested.length === 0) return;
   const visible = new Set(found.map((r) => r.id));
   const missing = requested.filter((id) => !visible.has(id));
@@ -306,7 +306,7 @@ async function assertMediaVisible(tx: Tx, tenantId: string, ids: string[]): Prom
     .select({ id: media.id })
     .from(media)
     .where(and(eq(media.tenantId, tenantId), inArray(media.id, ids), isNull(media.deletedAt)));
-  await assertVisible(rows, ids, "media", "Image");
+  assertVisible(rows, ids, "media", "Image");
 }
 
 async function assertTaxonomyVisible(
@@ -326,7 +326,7 @@ async function assertTaxonomyVisible(
           isNull(categories.deletedAt),
         ),
       );
-    await assertVisible(rows, categoryIds, "categoryIds", "Category");
+    assertVisible(rows, categoryIds, "categoryIds", "Category");
   }
 
   if (collectionIds.length > 0) {
@@ -340,7 +340,7 @@ async function assertTaxonomyVisible(
           isNull(collections.deletedAt),
         ),
       );
-    await assertVisible(rows, collectionIds, "collectionIds", "Collection");
+    assertVisible(rows, collectionIds, "collectionIds", "Collection");
   }
 }
 
