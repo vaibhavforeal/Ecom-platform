@@ -9,7 +9,8 @@
     "./tenancy": "./src/tenancy/index.ts",
     "./audit": "./src/audit/index.ts",
     "./catalog": "./src/catalog/index.ts",
-    "./catalog/server": "./src/catalog/server.ts"
+    "./catalog/server": "./src/catalog/server.ts",
+    "./media": "./src/media/index.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

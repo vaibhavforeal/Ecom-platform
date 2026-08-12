@@ -13,35 +13,47 @@ describe("mediaStorageKey", () => {
   });
 
   it("accepts all allowed extensions", () => {
-    const allowed = ["jpg", "jpeg", "png", "webp", "avif", "gif"];
+    expect(
+      mediaStorageKey({ tenantId: "test", checksum: "check", ext: "jpg" }),
+    ).toBe("test/originals/check.jpg");
 
-    for (const ext of allowed) {
-      expect(() =>
-        mediaStorageKey({
-          tenantId: "test",
-          checksum: "check",
-          ext,
-        }),
-      ).not.toThrow();
-    }
+    expect(
+      mediaStorageKey({ tenantId: "test", checksum: "check", ext: "jpeg" }),
+    ).toBe("test/originals/check.jpeg");
+
+    expect(
+      mediaStorageKey({ tenantId: "test", checksum: "check", ext: "png" }),
+    ).toBe("test/originals/check.png");
+
+    expect(
+      mediaStorageKey({ tenantId: "test", checksum: "check", ext: "webp" }),
+    ).toBe("test/originals/check.webp");
+
+    expect(
+      mediaStorageKey({ tenantId: "test", checksum: "check", ext: "avif" }),
+    ).toBe("test/originals/check.avif");
+
+    expect(
+      mediaStorageKey({ tenantId: "test", checksum: "check", ext: "gif" }),
+    ).toBe("test/originals/check.gif");
   });
 
-  it("accepts extensions case-insensitively", () => {
-    expect(() =>
+  it("accepts extensions case-insensitively and normalizes to lowercase", () => {
+    expect(
       mediaStorageKey({
         tenantId: "test",
         checksum: "check",
         ext: "JPG",
       }),
-    ).not.toThrow();
+    ).toBe("test/originals/check.jpg");
 
-    expect(() =>
+    expect(
       mediaStorageKey({
         tenantId: "test",
         checksum: "check",
         ext: "WebP",
       }),
-    ).not.toThrow();
+    ).toBe("test/originals/check.webp");
   });
 
   it("rejects disallowed extensions", () => {
@@ -76,29 +88,45 @@ describe("derivativeStorageKey", () => {
   });
 
   it("accepts all allowed formats", () => {
-    const allowed = ["jpg", "jpeg", "png", "webp", "avif"];
+    expect(
+      derivativeStorageKey({ tenantId: "test", checksum: "check", width: 800, format: "jpg" }),
+    ).toBe("test/d/check/800.jpg");
 
-    for (const format of allowed) {
-      expect(() =>
-        derivativeStorageKey({
-          tenantId: "test",
-          checksum: "check",
-          width: 800,
-          format,
-        }),
-      ).not.toThrow();
-    }
+    expect(
+      derivativeStorageKey({ tenantId: "test", checksum: "check", width: 800, format: "jpeg" }),
+    ).toBe("test/d/check/800.jpeg");
+
+    expect(
+      derivativeStorageKey({ tenantId: "test", checksum: "check", width: 800, format: "png" }),
+    ).toBe("test/d/check/800.png");
+
+    expect(
+      derivativeStorageKey({ tenantId: "test", checksum: "check", width: 800, format: "webp" }),
+    ).toBe("test/d/check/800.webp");
+
+    expect(
+      derivativeStorageKey({ tenantId: "test", checksum: "check", width: 800, format: "avif" }),
+    ).toBe("test/d/check/800.avif");
   });
 
-  it("accepts formats case-insensitively", () => {
-    expect(() =>
+  it("accepts formats case-insensitively and normalizes to lowercase", () => {
+    expect(
       derivativeStorageKey({
         tenantId: "test",
         checksum: "check",
         width: 800,
         format: "WEBP",
       }),
-    ).not.toThrow();
+    ).toBe("test/d/check/800.webp");
+
+    expect(
+      derivativeStorageKey({
+        tenantId: "test",
+        checksum: "check",
+        width: 800,
+        format: "PNG",
+      }),
+    ).toBe("test/d/check/800.png");
   });
 
   it("rejects disallowed formats", () => {
@@ -151,22 +179,22 @@ describe("derivativeStorageKey", () => {
   });
 
   it("accepts valid width range", () => {
-    expect(() =>
+    expect(
       derivativeStorageKey({
         tenantId: "acme",
         checksum: "abc",
         width: 1,
         format: "webp",
       }),
-    ).not.toThrow();
+    ).toBe("acme/d/abc/1.webp");
 
-    expect(() =>
+    expect(
       derivativeStorageKey({
         tenantId: "acme",
         checksum: "abc",
         width: 5000,
         format: "webp",
       }),
-    ).not.toThrow();
+    ).toBe("acme/d/abc/5000.webp");
   });
 });

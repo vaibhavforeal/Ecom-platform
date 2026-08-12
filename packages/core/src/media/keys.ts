@@ -28,14 +28,15 @@ export function mediaStorageKey(input: {
   ext: string;
 }): string {
   const { tenantId, checksum, ext } = input;
+  const normalizedExt = ext.toLowerCase();
 
-  if (!ALLOWED_EXTENSIONS.has(ext.toLowerCase())) {
+  if (!ALLOWED_EXTENSIONS.has(normalizedExt)) {
     throw new Error(
       `Extension "${ext}" not allowed. Allowed: ${Array.from(ALLOWED_EXTENSIONS).join(", ")}`,
     );
   }
 
-  return `${tenantId}/originals/${checksum}.${ext}`;
+  return `${tenantId}/originals/${checksum}.${normalizedExt}`;
 }
 
 /**
@@ -57,8 +58,9 @@ export function derivativeStorageKey(input: {
   format: string;
 }): string {
   const { tenantId, checksum, width, format } = input;
+  const normalizedFormat = format.toLowerCase();
 
-  if (!ALLOWED_FORMATS.has(format.toLowerCase())) {
+  if (!ALLOWED_FORMATS.has(normalizedFormat)) {
     throw new Error(
       `Format "${format}" not allowed. Allowed: ${Array.from(ALLOWED_FORMATS).join(", ")}`,
     );
@@ -68,5 +70,5 @@ export function derivativeStorageKey(input: {
     throw new Error(`Width ${width} out of range (1-5000)`);
   }
 
-  return `${tenantId}/d/${checksum}/${width}.${format}`;
+  return `${tenantId}/d/${checksum}/${width}.${normalizedFormat}`;
 }

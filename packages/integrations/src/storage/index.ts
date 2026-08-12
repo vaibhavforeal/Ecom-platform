@@ -1,3 +1,5 @@
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { StorageAdapter } from "@platform/core";
 import { createLocalDriver } from "./local";
 import { createS3Driver } from "./s3";
@@ -36,7 +38,16 @@ export function getStorage(): StorageAdapter {
   }
 
   if (driver === "local") {
-    const root = process.env.MEDIA_LOCAL_ROOT ?? ".media";
+    let root: string;
+    if (process.env.MEDIA_LOCAL_ROOT) {
+      root = process.env.MEDIA_LOCAL_ROOT;
+    } else {
+      // Default to <repo-root>/.media
+      // In a pnpm workspace: packages/integrations/src/storage/index.ts
+      // Resolve up to repo root (4 levels)
+      const currentDir = path.dirname(fileURLToPath(import.meta.url));
+      root = path.resolve(currentDir, "../../../..", ".media");
+    }
     cached = createLocalDriver(root);
   } else if (driver === "s3") {
     const endpoint = process.env.STORAGE_ENDPOINT;
