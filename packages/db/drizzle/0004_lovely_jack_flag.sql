@@ -93,22 +93,33 @@ BEGIN
     FROM media_checksum_dupes d
    WHERE v.image_media_id = d.loser;
 
-  -- product_media is keyed (tenant_id, product_id, media_id), so a
-  -- product holding both copies cannot have both repointed. Drop the
-  -- row that would collide — the product keeps the image either way —
-  -- then move the rest.
+  /*
+    product_media is keyed (tenant_id, product_id, media_id), so
+    repointing a loser to its keeper is never safe on its own: one
+    product can hold the keeper and several of its losers — the same
+    photograph uploaded three times before dedupe existed, then dropped
+    into one gallery twice — and every one of those rows would be
+    updated to the same key.
+
+    So attach the keeper where it is missing and drop every loser row,
+    which is one end state for all three topologies (keeper + loser,
+    loser alone, several losers) and needs no case analysis.
+
+    DISTINCT ON collapses the several-losers case to a single candidate
+    before the insert: ON CONFLICT arbitrates against rows already in
+    the table, not against the rest of its own command. Ordering by
+    position means the survivor keeps the earliest slot the image held.
+  */
+  INSERT INTO product_media (tenant_id, product_id, media_id, position)
+  SELECT DISTINCT ON (pm.tenant_id, pm.product_id, d.keeper)
+         pm.tenant_id, pm.product_id, d.keeper, pm.position
+    FROM product_media pm
+    JOIN media_checksum_dupes d ON d.loser = pm.media_id
+   ORDER BY pm.tenant_id, pm.product_id, d.keeper, pm.position
+  ON CONFLICT DO NOTHING;
+
   DELETE FROM product_media pm
    USING media_checksum_dupes d
-   WHERE pm.media_id = d.loser
-     AND EXISTS (
-       SELECT 1 FROM product_media keep
-        WHERE keep.tenant_id = pm.tenant_id
-          AND keep.product_id = pm.product_id
-          AND keep.media_id = d.keeper);
-
-  UPDATE product_media pm
-     SET media_id = d.keeper
-    FROM media_checksum_dupes d
    WHERE pm.media_id = d.loser;
 
   DELETE FROM media m

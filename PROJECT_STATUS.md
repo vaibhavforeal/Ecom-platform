@@ -333,15 +333,20 @@ If the database volume survived, the two demo tenants are still seeded. If not:
   The console test asserts this by reading the row on an independent
   connection at the moment the purge arrives.
 - **A bound string parameter cast straight to `::jsonb` stores a jsonb
-  STRING.** postgres.js asks the server for the parameter's inferred type,
-  sees `jsonb`, and JSON-*encodes* the string it was handed — so
+  STRING — on a bare `postgres()` client.** `ParameterDescription`
+  backfills the server-inferred OID (3802) into the statement, and
+  postgres.js's serializer for that OID is `JSON.stringify` — so
   `${JSON.stringify(x)}::jsonb` writes `"[{…}]"`, a jsonb string that
-  spells an array rather than the array. Drizzle's own writes are
-  unaffected (it sends parameters as text), and reading one back through
-  Drizzle hides it, because its jsonb decoder parses a string value. But
-  `jsonb_build_object` nests it as a string, and the storefront then finds
-  no derivatives on a row that looks correct in psql. Test fixtures bind
-  `::text::jsonb`.
+  spells an array rather than the array. **Drizzle is not saved by
+  sending text; it sends the same string** (`PgJsonb.mapToDriverValue`
+  is `JSON.stringify`). What saves it is that `drizzle(client)` MUTATES
+  the client, swapping `options.serializers["114"]` and `["3802"]` for
+  an identity function. The deciding factor is which client object you
+  hold, not the encoding — and test fixtures hold a bare one. Reading
+  the row back through Drizzle hides the damage (its jsonb decoder
+  parses a string value), but `jsonb_build_object` nests it as a string
+  and the storefront then finds no derivatives on a row that looks
+  correct in psql. Fixtures bind `::text::jsonb`.
 - **Drizzle's migrator runs every pending migration inside ONE
   transaction.** So `CREATE INDEX CONCURRENTLY` is illegal in a migration
   file — the unique checksum index de-duplicates first instead, which is

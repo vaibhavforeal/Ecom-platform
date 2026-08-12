@@ -54,15 +54,24 @@ const SHIRT_DERIVATIVES = [
 /**
  * Every jsonb fixture below is bound `::text::jsonb`, never `::jsonb`.
  *
- * With a bare `::jsonb`, postgres.js asks the server for the
- * parameter's inferred type, sees `jsonb`, and JSON-ENCODES the string
- * it was given — so the column ends up holding a jsonb *string* that
- * spells an array rather than the array itself. Drizzle's own writes do
- * not have this problem (it sends parameters as text), and reading one
- * back through Drizzle hides it (its jsonb decoder parses a string
- * value), but `jsonb_build_object` nests it as a string and the
- * storefront's `parseDerivatives` then finds no derivatives at all.
- * Casting through `text` sends it as text and lets Postgres parse it.
+ * With a bare `::jsonb`, postgres.js takes the parameter type the
+ * server infers (`ParameterDescription` backfills OID 3802 into the
+ * statement), and its serializer for that OID is `JSON.stringify` — so
+ * it JSON-ENCODES the string it was handed and the column ends up
+ * holding a jsonb *string* that spells an array rather than the array.
+ *
+ * Drizzle is not saved from this by sending text: `PgJsonb`'s
+ * `mapToDriverValue` hands over exactly the same `JSON.stringify(...)`
+ * string a fixture does. What saves it is that `drizzle(client)`
+ * MUTATES the client, replacing `options.serializers["114"]` and
+ * `["3802"]` with an identity function. So the deciding factor is which
+ * client object you hold, not the encoding: this file holds a bare
+ * `postgres()` client, which still has the encoding serializers.
+ *
+ * Reading one back through Drizzle hides the damage — its jsonb decoder
+ * parses a string value — but `jsonb_build_object` nests it as a string
+ * and `parseDerivatives` then finds no derivatives at all. Casting
+ * through `text` makes the inferred type `text` and lets Postgres parse.
  */
 
 beforeAll(async () => {
