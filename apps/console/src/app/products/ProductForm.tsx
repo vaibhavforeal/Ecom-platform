@@ -8,6 +8,7 @@ import { ALLOWED_DESCRIPTION_TAGS, cartesianCombinations } from "@platform/core/
 import {
   blankVariant,
   formKey,
+  mediaStatusFrom,
   parseAxisValues,
   parseTags,
   rebuildMatrix,
@@ -167,6 +168,7 @@ export function ProductForm({
       const data = (await res.json()) as {
         mediaId?: string;
         status?: string;
+        alt?: string | null;
         error?: { message?: string };
       };
 
@@ -178,12 +180,18 @@ export function ProductForm({
       // The upload response carries no storage key — the worker has not
       // written the derivatives yet. The row is real, so it can be
       // attached now; the thumbnail appears on the next page load.
+      //
+      // `alt` comes from the response and is null unless the upload
+      // deduplicated onto an image that already had one. It must NOT be
+      // "": `alt` lives on `media`, so saving a blank here would erase
+      // the sentence on every product using the same photograph, and
+      // the merchant would never have touched the box.
       const option: MediaOption = {
         id: data.mediaId,
         url: "",
         storageKey: "",
-        alt: "",
-        status: data.status === "ready" ? "ready" : "pending",
+        alt: data.alt ?? null,
+        status: mediaStatusFrom(data.status),
         processingError: null,
       };
       setLibrary((l) => (l.some((m) => m.id === option.id) ? l : [option, ...l]));
@@ -597,7 +605,11 @@ export function ProductForm({
                 </label>
                 <input
                   id={`alt-${item.mediaId}`}
-                  value={item.alt}
+                  // Null means "nothing typed here"; the box shows blank
+                  // and the save leaves the stored alt alone. Typing —
+                  // including clearing the box, which yields "" — is
+                  // what makes it a value the save writes.
+                  value={item.alt ?? ""}
                   onChange={(e) =>
                     setForm((f) => ({
                       ...f,
@@ -609,11 +621,21 @@ export function ProductForm({
                   maxLength={300}
                   placeholder="What is in the picture?"
                 />
-                {option && option.status !== "ready" && (
+                {option?.status === "pending" && (
                   <p className="muted">
-                    {option.status === "pending"
-                      ? "Still processing — the storefront will not show it until it is ready."
-                      : `Processing failed${option.processingError ? `: ${option.processingError}` : ""}.`}
+                    Still processing — the storefront will not show it until it is ready.
+                  </p>
+                )}
+                {option?.status === "failed" && (
+                  // `failed` is terminal for this row: nothing retries it
+                  // on its own and there is no retry button. Uploading
+                  // the same file again IS the retry — the upload route
+                  // skips failed rows when it deduplicates, so the
+                  // re-upload resets this row and re-queues it.
+                  <p className="error">
+                    Processing failed
+                    {option.processingError ? `: ${option.processingError}` : ""}. Upload the same
+                    file again to retry it — the storefront will not show it until it succeeds.
                   </p>
                 )}
               </div>

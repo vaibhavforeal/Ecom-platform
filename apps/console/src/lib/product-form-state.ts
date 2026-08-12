@@ -62,17 +62,41 @@ export type ProductFormState = {
   variants: VariantFormRow[];
   categoryIds: string[];
   collectionIds: string[];
-  media: { mediaId: string; alt: string }[];
+  /**
+   * `alt` is `string | null`, and null is not "empty" — it is "this form
+   * has nothing to say about the alt text, leave whatever is stored".
+   * The write layer honours exactly that (`writeGallery` skips null),
+   * and it has to, because `alt` lives on `media` rather than on the
+   * join: a blank sent for one product clears that sentence on EVERY
+   * product using the same photograph. A freshly uploaded image whose
+   * alt the merchant has not typed is null, not "".
+   */
+  media: { mediaId: string; alt: string | null }[];
 };
 
 export type MediaOption = {
   id: string;
   url: string;
   storageKey: string;
-  alt: string;
-  status: "pending" | "ready" | "failed";
+  /** Null when the image has no alt text stored. See `ProductFormState.media`. */
+  alt: string | null;
+  status: MediaStatus;
   processingError: string | null;
 };
+
+export type MediaStatus = "pending" | "ready" | "failed";
+
+/**
+ * Narrows whatever `/api/media/upload` answered to a status the form can
+ * render, defaulting to `pending`.
+ *
+ * Collapsing anything-not-`ready` to `pending` is what this replaces:
+ * `failed` and `pending` read identically to the merchant, and the form
+ * then tells them a permanently failed image is "still processing".
+ */
+export function mediaStatusFrom(value: unknown): MediaStatus {
+  return value === "ready" || value === "failed" ? value : "pending";
+}
 
 export type TaxonomyOption = { id: string; title: string; isVisible: boolean };
 
@@ -168,7 +192,11 @@ export function toFormState(product: ConsoleProduct): ProductFormState {
     })),
     categoryIds: product.categoryIds,
     collectionIds: product.collectionIds,
-    media: product.media.map((m) => ({ mediaId: m.id, alt: m.alt ?? "" })),
+    // `m.alt` passes through as-is, null included. Coercing a stored
+    // NULL to "" here would write "" back on the next save of a product
+    // whose alt nobody touched — a write, on a column shared with every
+    // other product using the image.
+    media: product.media.map((m) => ({ mediaId: m.id, alt: m.alt })),
   };
 }
 
@@ -185,7 +213,7 @@ export function toMediaOption(
     id: media.id,
     url,
     storageKey: media.storageKey,
-    alt: media.alt ?? "",
+    alt: media.alt,
     status: media.status,
     processingError: media.processingError,
   };

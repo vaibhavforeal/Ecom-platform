@@ -167,6 +167,17 @@ async function auditFor(entityId: string): Promise<{ action: string; after: unkn
 }
 
 beforeAll(async () => {
+  // Every catalog write in this suite calls `purgeStorefrontCache`, and
+  // the repo `.env` this config loads sets the origin to
+  // `http://localhost:3000` — so without this each write POSTs the REAL
+  // internal secret at whatever happens to hold port 3000 on the
+  // machine, with a 2s timeout budget each. Nothing here asserts a
+  // purge; the console purge contract has its own suite
+  // (`cache-purge.integration.test.ts`), which points the origin at a
+  // stub server it owns. Unset, `purgeStorefrontCache` logs
+  // `cache.purge_unconfigured` and returns without a request.
+  delete process.env.STOREFRONT_INTERNAL_ORIGIN;
+
   tenantA = await makeTenant();
   tenantB = await makeTenant();
 
@@ -1185,6 +1196,49 @@ describe("tenant isolation on every id a payload can name", () => {
     // merchant chose, and position 0 is the LCP image.
     const [image] = await admin<{ alt: string }[]>`SELECT alt FROM media WHERE id = ${mediaId}`;
     expect(image!.alt).toBe("first wins");
+  });
+
+  it("leaves a shared image's alt alone when the payload sends null, and clears it on \"\"", async () => {
+    sessionToken = ownerToken;
+
+    const mediaId = await makeMedia(tenantA);
+    await admin`UPDATE media SET alt = 'A folded linen shirt' WHERE id = ${mediaId}`;
+
+    // What the console sends for an image whose alt box nobody typed in
+    // — `ProductForm.tsx` attaches a freshly uploaded or library image
+    // with `alt: null`, not `alt: ""`. It matters because `alt` lives on
+    // `media` rather than on `product_media`, so a blank saved against
+    // ONE product wipes the sentence on every other product using the
+    // same photograph. The upload path used to send "" unconditionally,
+    // which reached this write without the merchant touching anything.
+    const untouched = await createProduct(
+      productPayload({ title: "Alt Untouched", media: [{ mediaId, alt: null }] }),
+    );
+    expect(untouched.status).toBe(201);
+
+    const [kept] = await admin<{ alt: string | null }[]>`
+      SELECT alt FROM media WHERE id = ${mediaId}`;
+    expect(kept!.alt).toBe("A folded linen shirt");
+
+    // Omitting the key entirely is the same statement — the schema
+    // defaults `alt` to null.
+    const omitted = await createProduct(
+      productPayload({ title: "Alt Omitted", media: [{ mediaId }] }),
+    );
+    expect(omitted.status).toBe(201);
+    const [still] = await admin<{ alt: string | null }[]>`
+      SELECT alt FROM media WHERE id = ${mediaId}`;
+    expect(still!.alt).toBe("A folded linen shirt");
+
+    // And "" is still a real instruction: a merchant who empties the box
+    // means "this image has no alt text", and must get that.
+    const cleared = await createProduct(
+      productPayload({ title: "Alt Cleared", media: [{ mediaId, alt: "" }] }),
+    );
+    expect(cleared.status).toBe(201);
+    const [gone] = await admin<{ alt: string | null }[]>`
+      SELECT alt FROM media WHERE id = ${mediaId}`;
+    expect(gone!.alt).toBe("");
   });
 
   it("lets an explicit id win over an earlier row's implicit SKU match", async () => {
