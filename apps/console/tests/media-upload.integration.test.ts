@@ -529,6 +529,97 @@ describe("POST /api/media/upload", () => {
     expect(await readMediaByTenant(tenantA)).toHaveLength(before);
   });
 
+  it("retries a FAILED row when the same file is uploaded again", async () => {
+    sessionToken = ownerToken;
+
+    const png = await sharp({
+      create: { width: 210, height: 140, channels: 3, background: { r: 3, g: 61, b: 90 } },
+    })
+      .png()
+      .toBuffer();
+
+    const first = await POST(
+      uploadRequest({ file: new File([png], "retry.png", { type: "image/png" }) }),
+    );
+    expect(first.status).toBe(201);
+    const { mediaId } = (await first.json()) as { mediaId: string };
+
+    // What the worker writes when libvips or storage lets it down, and
+    // what the route itself writes when Redis is unreachable. Nothing
+    // retries it: there is no retry endpoint, and the console renders a
+    // status line rather than a button.
+    await admin`
+      UPDATE media SET status = 'failed', processing_error = 'libvips said no'
+      WHERE id = ${mediaId}`;
+
+    const before = (await readMediaByTenant(tenantA)).length;
+    const enqueuedBefore = enqueued.length;
+
+    const second = await POST(
+      uploadRequest({ file: new File([png], "retry-again.png", { type: "image/png" }) }),
+    );
+
+    // NOT a 200 `deduplicated: true`. That was the defect: the dedupe
+    // SELECT matched the failed row, the route returned it untouched and
+    // never re-enqueued, and the merchant's only escape was altering the
+    // bytes to change the checksum.
+    expect(second.status).toBe(201);
+    expect(await second.json()).toMatchObject({ mediaId, status: "pending" });
+
+    // The same row, reset — not a second one. `(tenant, storage_key)` is
+    // unique and the key is the checksum, so a duplicate is impossible
+    // anyway; this pins that the conflict was resolved by repairing.
+    expect(await readMediaByTenant(tenantA)).toHaveLength(before);
+
+    const [row] = await admin<{ status: string; processing_error: string | null }[]>`
+      SELECT status, processing_error FROM media WHERE id = ${mediaId}`;
+    expect(row!.status).toBe("pending");
+    expect(row!.processing_error).toBeNull();
+
+    // The half that makes it a retry rather than a relabel.
+    expect(enqueued.slice(enqueuedBefore)).toEqual([{ tenantId: tenantA, mediaId }]);
+  });
+
+  it("returns the alt already on the row it deduplicated onto", async () => {
+    sessionToken = ownerToken;
+
+    const png = await sharp({
+      create: { width: 190, height: 190, channels: 3, background: { r: 120, g: 4, b: 200 } },
+    })
+      .png()
+      .toBuffer();
+
+    const first = await POST(
+      uploadRequest({ file: new File([png], "shared.png", { type: "image/png" }) }),
+    );
+    expect(first.status).toBe(201);
+    const { mediaId, alt: freshAlt } = (await first.json()) as {
+      mediaId: string;
+      alt: string | null;
+    };
+
+    // A brand-new row has no alt, and the response says so with null
+    // rather than "". The console treats null as "nothing to write".
+    expect(freshAlt).toBeNull();
+
+    await admin`UPDATE media SET alt = 'A folded linen shirt' WHERE id = ${mediaId}`;
+
+    const second = await POST(
+      uploadRequest({ file: new File([png], "shared-again.png", { type: "image/png" }) }),
+    );
+
+    // Without this the console attaches the image with a blank alt and
+    // the next save writes that blank to `media.alt` — which is shared,
+    // so it clears the sentence on EVERY product using the photograph,
+    // without the merchant touching the box.
+    expect(second.status).toBe(200);
+    expect(await second.json()).toMatchObject({
+      mediaId,
+      deduplicated: true,
+      alt: "A folded linen shirt",
+    });
+  });
+
   it("revives a soft-deleted row rather than colliding with it forever", async () => {
     sessionToken = ownerToken;
 

@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 import { assertCan } from "@platform/core";
 import { MAX_UPLOAD_BYTES, mediaStorageKey, sha256, validateUpload } from "@platform/core/media";
-import { and, desc, eq, isNull, media, withTenant } from "@platform/db";
+import { and, desc, eq, isNull, media, ne, withTenant } from "@platform/db";
 import { getStorage } from "@platform/integrations/storage";
 
 import { errorResponse, newRequestId, readBoundedBody } from "../../../../lib/api";
@@ -106,12 +106,29 @@ export async function POST(req: Request): Promise<NextResponse> {
      * Dedupe. Merchants re-upload the same photograph across a dozen
      * products; each one would otherwise cost a fresh decode and
      * eighteen encodes to produce bytes that already exist.
+     *
+     * `failed` is EXCLUDED, and that exclusion is the only retry this
+     * pipeline has. There is no retry endpoint; the console renders a
+     * non-`ready` row as a status line and nothing more. Matching a
+     * failed row here would return it with `deduplicated: true` and
+     * never re-enqueue, so the row would stay failed forever and the
+     * merchant's only escape would be altering the bytes to change the
+     * checksum. Falling through instead sends the upload down the
+     * normal path, where the insert conflicts on the failed row's
+     * (tenant, storage_key) and the branch below resets and re-queues
+     * it.
      */
     const existing = await withTenant(tenantId, async (tx) => {
       const rows = await tx
-        .select({ id: media.id, status: media.status })
+        .select({ id: media.id, status: media.status, alt: media.alt })
         .from(media)
-        .where(and(eq(media.checksum, checksum), isNull(media.deletedAt)))
+        .where(
+          and(
+            eq(media.checksum, checksum),
+            isNull(media.deletedAt),
+            ne(media.status, "failed"),
+          ),
+        )
         .orderBy(desc(media.createdAt))
         .limit(1);
       return rows[0] ?? null;
@@ -121,6 +138,12 @@ export async function POST(req: Request): Promise<NextResponse> {
       return NextResponse.json({
         mediaId: existing.id,
         status: existing.status,
+        // The alt already on the row. The console attaches the returned
+        // option to the gallery, and without this it would attach a
+        // blank alt and write that blank over the stored one on save —
+        // on every product using this photograph, because `alt` lives
+        // on `media` rather than on the join.
+        alt: existing.alt,
         checksum,
         deduplicated: true,
         requestId,
@@ -172,7 +195,7 @@ export async function POST(req: Request): Promise<NextResponse> {
 
     /**
      * `onConflictDoNothing` on the (tenant, storage_key) unique index.
-     * Two cases land here, and both were a 500 before:
+     * Three cases land here, and the first two were a 500 before:
      *
      *  · Two uploads of the same file racing — the dedupe SELECT above
      *    is not atomic with this insert.
@@ -180,6 +203,8 @@ export async function POST(req: Request): Promise<NextResponse> {
      *    `deleted_at IS NULL`; the unique index has no such predicate.
      *    So once media deletion exists, re-uploading a previously
      *    deleted file collides — permanently, for that one file.
+     *  · A FAILED row for the same file, which the dedupe SELECT now
+     *    skips on purpose so that re-uploading is the retry.
      */
     const inserted = await withTenant(tenantId, async (tx) => {
       const rows = await tx
@@ -201,13 +226,20 @@ export async function POST(req: Request): Promise<NextResponse> {
     });
 
     let mediaId: string;
+    /** The alt already on the row, if this upload landed on an existing one. */
+    let alt: string | null = null;
 
     if (inserted) {
       mediaId = inserted.id;
     } else {
       const claimed = await withTenant(tenantId, async (tx) => {
         const rows = await tx
-          .select({ id: media.id, status: media.status, deletedAt: media.deletedAt })
+          .select({
+            id: media.id,
+            status: media.status,
+            alt: media.alt,
+            deletedAt: media.deletedAt,
+          })
           .from(media)
           .where(eq(media.storageKey, storageKey))
           .limit(1);
@@ -220,21 +252,25 @@ export async function POST(req: Request): Promise<NextResponse> {
         throw new Error(`media insert conflicted on an unreadable row for tenant ${tenantId}`);
       }
 
-      if (!claimed.deletedAt) {
+      if (!claimed.deletedAt && claimed.status !== "failed") {
         // A concurrent upload of the same file won. Same answer the
         // dedupe branch would have given a moment earlier.
         return NextResponse.json({
           mediaId: claimed.id,
           status: claimed.status,
+          alt: claimed.alt,
           checksum,
           deduplicated: true,
           requestId,
         });
       }
 
-      // Soft-deleted, and the merchant has just uploaded the file again.
-      // Undelete and reprocess: plainly what they asked for, and the
-      // alternative is a 500 that never stops happening for that file.
+      // Soft-deleted, or failed, and the merchant has just uploaded the
+      // file again. Undelete and reprocess: plainly what they asked for,
+      // and the alternative is either a 500 that never stops happening
+      // for that file, or a row that stays `failed` for good. The bytes
+      // were re-stored above under the same content-addressed key, so a
+      // failure that was the missing original is repaired too.
       await withTenant(tenantId, async (tx) => {
         await tx
           .update(media)
@@ -251,6 +287,9 @@ export async function POST(req: Request): Promise<NextResponse> {
           .where(eq(media.id, claimed.id));
       });
       mediaId = claimed.id;
+      // Deliberately NOT cleared by the update above: the sentence
+      // describing this photograph is still true of the same bytes.
+      alt = claimed.alt;
     }
 
     try {
@@ -272,7 +311,7 @@ export async function POST(req: Request): Promise<NextResponse> {
     }
 
     return NextResponse.json(
-      { mediaId, status: "pending", checksum, requestId },
+      { mediaId, status: "pending", alt, checksum, requestId },
       { status: 201 },
     );
   } catch (err) {
