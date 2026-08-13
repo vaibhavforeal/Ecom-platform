@@ -33,6 +33,7 @@ if (!migratorUrl) throw new Error("DATABASE_URL_MIGRATOR must be set to run inte
 const admin = postgres(migratorUrl, { max: 2, onnotice: () => {} });
 
 let tenantId: string;
+let planId: string;
 let productId: string;
 
 beforeAll(async () => {
@@ -41,9 +42,10 @@ beforeAll(async () => {
     INSERT INTO plans (id, code, name)
     VALUES (${randomUUID()}, ${"sf-" + randomUUID().slice(0, 8)}, 'Sanitise test plan')
     RETURNING id`;
+  planId = plan!.id;
   const [tenant] = await admin<{ id: string }[]>`
     INSERT INTO tenants (id, slug, legal_name, display_name, plan_id, status)
-    VALUES (${randomUUID()}, ${slug}, ${slug}, ${slug}, ${plan!.id}, 'active')
+    VALUES (${randomUUID()}, ${slug}, ${slug}, ${slug}, ${planId}, 'active')
     RETURNING id`;
   tenantId = tenant!.id;
 
@@ -65,6 +67,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await admin`DELETE FROM tenants WHERE id = ${tenantId}`;
+  await admin`DELETE FROM plans WHERE id = ${planId}`;
   await admin.end({ timeout: 5 });
   await closeConnections();
 });

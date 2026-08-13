@@ -544,6 +544,7 @@ describe("processMedia", () => {
     expect(failed.processing_error).toMatch(/pixel limit/i);       // still names the cause
     expect(failed.processing_error).not.toMatch(/VipsImage|sharp/); // no library internals
     expect(failed.processing_error).not.toContain(failed.storage_key!); // no internal keys
+    expect(failed.processing_error).toBe("The image exceeds the pixel limit for processing.");
   });
 });
 
