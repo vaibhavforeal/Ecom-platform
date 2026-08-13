@@ -396,6 +396,34 @@ describe("serialising", () => {
     expect(products[0]!.title).toBe(hostile);
   });
 
+  it("keeps a foreign file's legitimate leading apostrophe", () => {
+    // A file this exporter never wrote (e.g. a Shopify export) may carry a
+    // real leading apostrophe. Only strings escapeFormula could have
+    // produced get unescaped: '=... '+... '-... '@... ''... '\t... '\r...
+    const csv = [
+      "handle,title,price,weight_grams,option1_name,option1_value,sku",
+      `retro-tee,'90s Tee,499.00,180,Size,M,'0012`,
+    ].join("\r\n");
+
+    const parsed = parseCatalogCsv(parseCsvRecords(csv));
+    expect(parsed.issues).toEqual([]);
+    expect(parsed.products[0]!.title).toBe("'90s Tee");
+    expect(parsed.products[0]!.variants[0]!.sku).toBe("'0012");
+  });
+
+  it("still unescapes everything its own exporter produces", () => {
+    // The existing round-trip tests cover the full path; this pins the
+    // boundary cases of the narrower unescape directly.
+    const csv = [
+      "handle,title,price,weight_grams,option1_name,option1_value,sku",
+      `guarded,'=SUM(A1),499.00,180,Size,M,''starts-with-quote`,
+    ].join("\r\n");
+
+    const parsed = parseCatalogCsv(parseCsvRecords(csv));
+    expect(parsed.products[0]!.title).toBe("=SUM(A1)");
+    expect(parsed.products[0]!.variants[0]!.sku).toBe("'starts-with-quote");
+  });
+
   it("writes the header in the documented column order", () => {
     // Spelled out rather than built from CSV_COLUMNS, which is the thing
     // under test: a header derived from the constant agrees with any

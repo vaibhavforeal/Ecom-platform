@@ -359,6 +359,8 @@ const FORMULA_LEAD = new Set(["=", "+", "-", "@", "\t", "\r"]);
  * the original exactly and the round trip stays a no-op. The usual fix
  * (prefix unconditionally, never strip) is not reversible, and would
  * make every re-import a rewrite and every re-export longer again.
+ * The unescape strips only what this function could have produced, so a
+ * foreign file's legitimate leading apostrophe survives an import.
  */
 function escapeFormula(value: string): string {
   const first = value.charAt(0);
@@ -366,7 +368,12 @@ function escapeFormula(value: string): string {
 }
 
 function unescapeFormula(value: string): string {
-  return value.charAt(0) === "'" ? value.slice(1) : value;
+  if (value.charAt(0) !== "'") return value;
+  const next = value.charAt(1);
+  // Strip only what escapeFormula could have added: a guard in front of
+  // a formula lead or in front of another apostrophe. A foreign file's
+  // legitimate leading apostrophe ('90s Tee) passes through untouched.
+  return next === "'" || FORMULA_LEAD.has(next) ? value.slice(1) : value;
 }
 
 // ───────────────────────────────────────────────────────────────
