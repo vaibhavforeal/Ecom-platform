@@ -739,6 +739,9 @@ describe("caps that only bite once the file is merged over what is stored", () =
     expect(second.report!.issues[0]!.message).toContain(
       '"cap-vars" would have 250 variants — 50 from this file and 200 already on the product',
     );
+    expect(second.report!.issues[0]!.message).toContain(
+      'To leave it untouched, remove its rows from the file; to shrink it, trim its variants in the console first.',
+    );
 
     const variants = await admin<{ count: string }[]>`
       SELECT count(*)::int AS count FROM product_variants

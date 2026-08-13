@@ -323,7 +323,8 @@ function overflowIssues(draft: CsvProductDraft, merged: Merged, retained: number
       message:
         `"${draft.handle}" would have ${total} variants — ${draft.variants.length} from this ` +
         `file and ${retained} already on the product that the file does not mention, which ` +
-        `are kept — and a product can have at most ${MAX_VARIANTS_PER_PRODUCT}.`,
+        `are kept — and a product can have at most ${MAX_VARIANTS_PER_PRODUCT}. ` +
+        `To leave it untouched, remove its rows from the file; to shrink it, trim its variants in the console first.`,
     });
   }
 
@@ -351,7 +352,8 @@ function overflowIssues(draft: CsvProductDraft, merged: Merged, retained: number
       message:
         `"${axis.name}" would have ${axis.values.length} values — this file adds to the ones ` +
         `already on the product, which are kept — and an option can have at most ` +
-        `${MAX_OPTION_VALUES}.`,
+        `${MAX_OPTION_VALUES}. ` +
+        `To leave it untouched, remove its rows from the file; to shrink an axis, edit the product in the console first.`,
     });
   });
 
