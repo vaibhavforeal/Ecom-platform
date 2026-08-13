@@ -124,16 +124,22 @@ let tenantId: string;
 let ownerToken: string;
 let ownerUserId: string;
 
+const createdTenants: string[] = [];
+const createdUsers: string[] = [];
+let planId: string;
+
 async function makeTenant(): Promise<string> {
   const slug = "cp-" + randomUUID().slice(0, 12);
   const [plan] = await admin<{ id: string }[]>`
     INSERT INTO plans (id, code, name)
     VALUES (${randomUUID()}, ${"cp-" + randomUUID().slice(0, 8)}, 'Cache purge test plan')
     RETURNING id`;
+  planId = plan!.id;
   const [tenant] = await admin<{ id: string }[]>`
     INSERT INTO tenants (id, slug, legal_name, display_name, plan_id, status)
     VALUES (${randomUUID()}, ${slug}, ${slug}, ${slug}, ${plan!.id}, 'active')
     RETURNING id`;
+  createdTenants.push(tenant!.id);
   return tenant!.id;
 }
 
@@ -192,6 +198,7 @@ beforeAll(async () => {
   tenantId = await makeTenant();
 
   ownerUserId = randomUUID();
+  createdUsers.push(ownerUserId);
   const phone = "+9199" + String(Math.floor(Math.random() * 1e8)).padStart(8, "0");
   await admin`
     INSERT INTO users (id, phone_e164, name) VALUES (${ownerUserId}, ${phone}, 'Cache purge')`;
@@ -222,6 +229,13 @@ afterEach(() => {
 afterAll(async () => {
   await new Promise<void>((resolve) => server.close(() => resolve()));
   await closeRedis();
+  if (createdTenants.length > 0) {
+    await admin`DELETE FROM tenants WHERE id IN ${admin(createdTenants)}`;
+  }
+  if (createdUsers.length > 0) {
+    await admin`DELETE FROM users WHERE id IN ${admin(createdUsers)}`;
+  }
+  await admin`DELETE FROM plans WHERE id = ${planId}`;
   await admin.end();
   await observer.end();
   await closeConnections();

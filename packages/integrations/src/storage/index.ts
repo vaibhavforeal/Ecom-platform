@@ -24,7 +24,8 @@ let cached: StorageAdapter | undefined;
 export function getStorage(): StorageAdapter {
   if (cached) return cached;
 
-  const driver = process.env.STORAGE_DRIVER ?? "local";
+  // || not ??: a blank value in .env means "no decision", same as unset.
+  const driver = process.env.STORAGE_DRIVER || "local";
   const isProduction = process.env.NODE_ENV === "production";
 
   if (isProduction && !process.env.STORAGE_DRIVER) {

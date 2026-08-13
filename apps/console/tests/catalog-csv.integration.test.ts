@@ -47,21 +47,28 @@ let tenantB: string;
 let ownerToken: string;
 let cashierToken: string;
 
+const createdTenants: string[] = [];
+const createdUsers: string[] = [];
+const createdPlans: Set<string> = new Set();
+
 async function makeTenant(): Promise<string> {
   const slug = "csv-" + randomUUID().slice(0, 10);
   const [plan] = await admin<{ id: string }[]>`
     INSERT INTO plans (id, code, name)
     VALUES (${randomUUID()}, ${"csv-" + randomUUID().slice(0, 8)}, 'CSV test plan')
     RETURNING id`;
+  createdPlans.add(plan!.id);
   const [tenant] = await admin<{ id: string }[]>`
     INSERT INTO tenants (id, slug, legal_name, display_name, plan_id, status)
     VALUES (${randomUUID()}, ${slug}, ${slug}, ${slug}, ${plan!.id}, 'active')
     RETURNING id`;
+  createdTenants.push(tenant!.id);
   return tenant!.id;
 }
 
 async function makeSession(tenantId: string, role: string): Promise<string> {
   const userId = randomUUID();
+  createdUsers.push(userId);
   const phone = "+9198" + String(Math.floor(Math.random() * 1e8)).padStart(8, "0");
   await admin`INSERT INTO users (id, phone_e164, name) VALUES (${userId}, ${phone}, 'CSV test')`;
   await admin`
@@ -196,6 +203,15 @@ afterEach(() => {
 
 afterAll(async () => {
   await closeRedis();
+  if (createdTenants.length > 0) {
+    await admin`DELETE FROM tenants WHERE id IN ${admin(createdTenants)}`;
+  }
+  if (createdUsers.length > 0) {
+    await admin`DELETE FROM users WHERE id IN ${admin(createdUsers)}`;
+  }
+  if (createdPlans.size > 0) {
+    await admin`DELETE FROM plans WHERE id IN ${admin([...createdPlans])}`;
+  }
   await admin.end();
   await closeConnections();
 });
@@ -512,6 +528,28 @@ describe("what an import actually changes", () => {
     expect(gone!.summary).toBeNull();
   });
 
+  it("dry run names the fields an update changes, flagging clears", async () => {
+    const tenant = await makeTenant();
+    sessionToken = await makeSession(tenant, "owner");
+    // Seed a product with a description via the normal import path.
+    const seed =
+      "handle,title,price,weight_grams,option1_name,option1_value,sku,description\r\n" +
+      "diff-tee,Diff Tee,499.00,180,Size,M,DIFF-M,<p>Keep me.</p>\r\n";
+    await importCsv(seed, { commit: true });
+
+    // Same product, new title, description column present but blank.
+    const update =
+      "handle,title,price,weight_grams,option1_name,option1_value,sku,description\r\n" +
+      "diff-tee,Diff Tee Renamed,499.00,180,Size,M,DIFF-M,\r\n";
+    const { report } = await importCsv(update, { commit: false });
+
+    expect(report!.updated).toBe(1);
+    const result = report!.results.find((r) => r.handle === "diff-tee")!;
+    expect(result.changes).toContain("title");
+    expect(result.changes).toContain("description (cleared)");
+    expect(result.changes).not.toContain("variants");
+  });
+
   it("does not put a switched-off variant back on sale through a blank cell", async () => {
     const tenant = await makeTenant();
     sessionToken = await makeSession(tenant, "owner");
@@ -716,6 +754,9 @@ describe("caps that only bite once the file is merged over what is stored", () =
     expect(second.report!.issues[0]).toMatchObject({ row: 2, column: "handle" });
     expect(second.report!.issues[0]!.message).toContain(
       '"cap-vars" would have 250 variants — 50 from this file and 200 already on the product',
+    );
+    expect(second.report!.issues[0]!.message).toContain(
+      'To leave it untouched, remove its rows from the file; to shrink it, trim its variants in the console first.',
     );
 
     const variants = await admin<{ count: string }[]>`

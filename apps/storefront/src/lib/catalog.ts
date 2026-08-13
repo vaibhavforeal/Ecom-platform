@@ -8,6 +8,7 @@ import {
   listProducts,
   listSitemapEntries,
   resolveStorefrontSlug,
+  sanitizeDescriptionHtml,
 } from "@platform/core/catalog/server";
 import type { ListOptions } from "@platform/core/catalog/server";
 
@@ -61,7 +62,20 @@ export function getCachedSlugResolution(tenantId: string, slug: string) {
 
 export function getCachedProduct(tenantId: string, productId: string) {
   return unstable_cache(
-    () => getProductById(tenantId, productId),
+    async () => {
+      const product = await getProductById(tenantId, productId);
+      // Defence in depth, amortised: descriptions are sanitised on
+      // write, but a row written past the write layer (psql, a restored
+      // dump, a backfill) must still never reach
+      // dangerouslySetInnerHTML. Sanitising here covers every render of
+      // this cache entry for the price of one pass per fill. The
+      // sanitiser is idempotent, so a correctly written row is
+      // unchanged.
+      if (product?.description) {
+        return { ...product, description: sanitizeDescriptionHtml(product.description) || null };
+      }
+      return product;
+    },
     ["product", tenantId, productId],
     {
       tags: [catalogTags.all(tenantId), catalogTags.product(tenantId, productId)],

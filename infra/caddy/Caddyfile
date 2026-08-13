@@ -22,7 +22,10 @@
 		# drive certificate issuance until Let's Encrypt rate-limits the
 		# account — taking custom domains down for every tenant. This is
 		# a known, actively exploited failure mode, not a theoretical one.
-		ask http://console:3001/api/internal/verify-domain
+		#
+		# The secret is DEDICATED to TLS issuance: rotating the purge
+		# secret (INTERNAL_API_SECRET) must not touch TLS and vice versa.
+		ask http://console:3001/api/internal/verify-domain?secret={$TLS_ASK_SECRET}
 
 		# Second layer: even authorised issuance is throttled, so a
 		# compromised or buggy ask endpoint cannot cause a stampede.

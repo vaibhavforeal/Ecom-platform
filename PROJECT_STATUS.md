@@ -200,6 +200,40 @@ same `tsconfig.json` / `tsconfig.test.json` split as `apps/console` — tests mu
 stay out of what `next build` typechecks, or a production install without
 devDependencies fails the build.
 
+### Re-verified 2026-08-13 (hardening wave, full, all green)
+
+```
+pnpm lint                clean
+pnpm typecheck           6/6 packages
+pnpm build               2/2 Next apps      (Next 16.3.0, Turbopack)
+pnpm test                325 unit tests     (core 279, integrations 46)
+pnpm test:integration    185 tests          (console 101, core 25, db 32, storefront 16, worker 11)
+```
+
+Unit **321 → 325**: core +2 are the `unescapeFormula` bijection tests
+(`8cb7841`); integrations +2 are the blank-`STORAGE_DRIVER` fail-closed tests
+(`b5bedca`). Integration **174 → 185**: console +8 — the dry-run preview's
+field-level change list (`bda566a`) +1, the fractional-weight pin (`7760751`)
++1, the over-cap console trim path (`a196b99`) +1, and the new
+`verify-domain.integration.test.ts` suite for the `TLS_ASK_SECRET` split
+(`df845ee`) +5; storefront +1 is the new sanitise-at-cache-fill suite
+(`0b94be5`); worker +2 are checksum-collision adoption and the curated
+`processing_error` message (`5346d0e`). Core and db integration counts are
+unchanged. Every delta was reconciled against its commit.
+
+`pnpm test:integration` is now SERIALIZED, not concurrent: `turbo.json` gives
+the task `dependsOn: ["^test:integration"]` (`6813513`), so `@platform/db` —
+whose migration-replay suite takes `ACCESS EXCLUSIVE` on `media` — runs alone
+first, then core, then the three apps. Observed in this run: db's suite
+printed its summary before core's started. The same commit makes every
+integration suite delete what it creates (tenants → users → plans), and
+`1bc9fb9` restores worker env vars before the pool closes.
+
+This gate run also fixed three lint errors the wave's new test files had left
+behind (an unused `createHash` import in the verify-domain suite; a
+`require()`-style import and an unused binding in the worker suite) — test
+counts were not affected.
+
 The Postgres volume survived the restart: both demo tenants (`acme`, `globex`) and
 their `.localhost` domains are still seeded. `users` is empty, so the staff row for
 console login needs re-adding with the SQL in the README before the console is usable.
@@ -316,12 +350,15 @@ If the database volume survived, the two demo tenants are still seeded. If not:
   this. Every id a payload names is checked with an explicit SELECT
   inside `withTenant` before it is written (`assertVisible` in
   `catalog/writes.ts`); there is an integration test for it.
-- **`sanitize-html` pulls in `postcss`, which reads `fs`.** It lives in
-  the client-safe `@platform/core/catalog` barrel because the module
-  itself is pure, and webpack tree-shakes it out of both apps' client
-  bundles — verified by grepping `.next/static/chunks`. A client
-  component that imported `sanitizeDescriptionHtml` would fail the build,
-  which is the right failure: nothing needs it in a browser.
+- **`sanitize-html` lives behind `@platform/core/catalog/server`**, not
+  the pure barrel. Under Turbopack a client import would not fail the
+  build — it would silently ship sanitize-html (~190 kB with postcss) to
+  browsers. The `catalog/server` barrel also pulls the postgres driver,
+  whose `fs`/`net` imports DO still hard-fail a client build, which is the
+  guard. The two policy constants (`ALLOWED_DESCRIPTION_TAGS`,
+  `ALLOWED_LINK_SCHEMES`) live in `description-policy.ts` and are
+  re-exported by the pure barrel so client components (the console's
+  editor toolbar) can import them without dragging in the sanitiser.
 - **`product_variants` has two PARTIAL unique indexes** over
   `deleted_at IS NULL` — one on SKU, one on the option combination. A
   save that swaps two variants' SKUs collides mid-UPDATE if the rows are

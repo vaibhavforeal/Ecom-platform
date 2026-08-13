@@ -5,7 +5,6 @@ import { notFound, permanentRedirect } from "next/navigation";
 import {
   buildCategoryTree,
   categoryPath,
-  sanitizeDescriptionHtml,
   subtreeIds,
 } from "@platform/core/catalog";
 import type { CategorySummary, ProductDetail } from "@platform/core/catalog/server";
@@ -358,28 +357,10 @@ function ProductView({
 
         <VariantPicker axes={product.axes} variants={product.variants} />
 
-        {/*
-          Merchant HTML, rendered as HTML.
-
-          `products.description` is sanitised on the way IN — the console
-          write layer runs `sanitizeDescriptionHtml` before the string
-          reaches the column, so every consumer (this page, CSV export, a
-          WhatsApp preview) gets clean data without each remembering.
-          That is the control.
-
-          The second pass below is NOT that control and must not be
-          mistaken for it. It is one line that costs microseconds and
-          closes the case the first cannot: a row written by a path that
-          bypassed the write layer — psql, a restored dump, a backfill
-          script — reaching `dangerouslySetInnerHTML`. The sanitiser is
-          idempotent (there is a test), so for a correctly written row
-          this changes precisely nothing.
-        */}
+        {/* Sanitised at the cache fill in lib/catalog.ts — never render a
+            description that has not passed through getCachedProduct. */}
         {product.description && (
-          <div
-            className="prose"
-            dangerouslySetInnerHTML={{ __html: sanitizeDescriptionHtml(product.description) }}
-          />
+          <div className="prose" dangerouslySetInnerHTML={{ __html: product.description }} />
         )}
       </article>
     </main>

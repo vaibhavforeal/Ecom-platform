@@ -52,6 +52,7 @@ const HERO_DERIVATIVES = [
 ];
 
 let tenantId: string;
+let planId: string;
 
 async function card(title: string) {
   const { items } = await listProducts(tenantId);
@@ -69,6 +70,7 @@ beforeAll(async () => {
     INSERT INTO plans (id, code, name)
     VALUES (${randomUUID()}, ${"s-" + randomUUID().slice(0, 8)}, 'Storefront image plan')
     RETURNING id`;
+  planId = plan!.id;
   const slug = "s-" + randomUUID().slice(0, 12);
   const [tenant] = await admin<{ id: string }[]>`
     INSERT INTO tenants (id, slug, legal_name, display_name, plan_id, status)
@@ -132,6 +134,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await admin`DELETE FROM tenants WHERE id = ${tenantId}`;
+  await admin`DELETE FROM plans WHERE id = ${planId}`;
   await admin.end({ timeout: 5 });
   await closeConnections();
 });

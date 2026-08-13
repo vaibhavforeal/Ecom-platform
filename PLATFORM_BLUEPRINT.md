@@ -197,7 +197,7 @@ When a merchant points `shop.theirbrand.com` at you, you must obtain a TLS certi
 ```caddyfile
 {
   on_demand_tls {
-    ask http://console:3001/api/internal/verify-domain
+    ask http://console:3001/api/internal/verify-domain?secret={$TLS_ASK_SECRET}
     interval 2m
     burst 5
   }

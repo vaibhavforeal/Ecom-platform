@@ -37,6 +37,7 @@ let tenantA: string;
 let tenantB: string;
 let productA: string;
 let productB: string;
+let planId: string;
 
 /**
  * Both tenants publish a product at the SAME slug.
@@ -80,6 +81,7 @@ beforeAll(async () => {
     INSERT INTO plans (id, code, name)
     VALUES (${randomUUID()}, ${"test-" + randomUUID().slice(0, 8)}, 'Isolation test plan')
     RETURNING id`;
+  planId = plan!.id;
 
   const mk = async (slug: string) => {
     const [t] = await admin<{ id: string }[]>`
@@ -130,6 +132,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await admin`DELETE FROM tenants WHERE id IN (${tenantA}, ${tenantB})`;
+  await admin`DELETE FROM plans WHERE id = ${planId}`;
   await admin.end({ timeout: 5 });
   await closeConnections();
 });

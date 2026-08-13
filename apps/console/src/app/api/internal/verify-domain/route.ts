@@ -6,6 +6,23 @@ import { isDomainVerifiedForTls } from "@platform/core";
 
 export const dynamic = "force-dynamic";
 
+const RELAXED_ENVIRONMENTS = new Set(["development", "test"]);
+
+/**
+ * Caddy's on_demand_tls `ask` cannot attach headers, so the secret
+ * rides the ask URL's query string — set once in the Caddyfile via
+ * {$TLS_ASK_SECRET}. This is a DEDICATED credential: it must never be
+ * INTERNAL_API_SECRET, which authorises cache purges on the storefront.
+ * A leaked ask URL should decide nothing but TLS issuance.
+ */
+function askSecretOk(url: URL): boolean {
+  const expected = process.env.TLS_ASK_SECRET;
+  if (!expected) return RELAXED_ENVIRONMENTS.has(process.env.NODE_ENV ?? "");
+  const provided = Buffer.from(url.searchParams.get("secret") ?? "");
+  const wanted = Buffer.from(expected);
+  return provided.length === wanted.length && timingSafeEqual(provided, wanted);
+}
+
 /**
  * Caddy's on-demand TLS `ask` endpoint.
  *
@@ -19,19 +36,10 @@ export const dynamic = "force-dynamic";
  */
 export async function GET(req: Request): Promise<NextResponse> {
   const url = new URL(req.url);
-  const domain = url.searchParams.get("domain");
 
-  // Defence in depth: this endpoint should be unreachable from the
-  // public internet, but it must also refuse anything that is not Caddy.
-  const expected = process.env.INTERNAL_API_SECRET;
-  if (expected) {
-    const provided = req.headers.get("x-internal-secret") ?? "";
-    const a = Buffer.from(provided);
-    const b = Buffer.from(expected);
-    if (a.length !== b.length || !timingSafeEqual(a, b)) {
-      return new NextResponse(null, { status: 403 });
-    }
-  }
+  if (!askSecretOk(url)) return new NextResponse(null, { status: 403 });
+
+  const domain = url.searchParams.get("domain");
 
   if (!domain) return new NextResponse(null, { status: 400 });
 

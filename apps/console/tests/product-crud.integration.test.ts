@@ -62,16 +62,22 @@ let cashierToken: string;
 /** A media row belonging to tenant B, for the cross-tenant attach test. */
 let foreignMediaId: string;
 
+const createdTenants: string[] = [];
+const createdUsers: string[] = [];
+const createdPlans: Set<string> = new Set();
+
 async function makeTenant(): Promise<string> {
   const slug = "c-" + randomUUID().slice(0, 12);
   const [plan] = await admin<{ id: string }[]>`
     INSERT INTO plans (id, code, name)
     VALUES (${randomUUID()}, ${"c-" + randomUUID().slice(0, 8)}, 'Catalog test plan')
     RETURNING id`;
+  createdPlans.add(plan!.id);
   const [tenant] = await admin<{ id: string }[]>`
     INSERT INTO tenants (id, slug, legal_name, display_name, plan_id, status)
     VALUES (${randomUUID()}, ${slug}, ${slug}, ${slug}, ${plan!.id}, 'active')
     RETURNING id`;
+  createdTenants.push(tenant!.id);
   return tenant!.id;
 }
 
@@ -80,6 +86,7 @@ async function makeSession(
   role: string,
 ): Promise<{ token: string; userId: string }> {
   const userId = randomUUID();
+  createdUsers.push(userId);
   const phone = "+9197" + String(Math.floor(Math.random() * 1e8)).padStart(8, "0");
   await admin`INSERT INTO users (id, phone_e164, name) VALUES (${userId}, ${phone}, 'Catalog test')`;
   await admin`
@@ -166,6 +173,129 @@ async function auditFor(entityId: string): Promise<{ action: string; after: unkn
     SELECT action, after FROM audit_log WHERE entity_id = ${entityId} ORDER BY created_at`;
 }
 
+/**
+ * Creates a product with the specified number of variants by direct SQL
+ * insertion, simulating a legacy over-cap product. Returns the product id.
+ * Uses distinct SKUs and distinct option combinations to satisfy the partial
+ * unique indexes. Creates a multi-axis matrix to avoid hitting per-axis caps.
+ */
+async function makeOverCapProduct(tenantId: string, variantCount: number): Promise<string> {
+  const productId = randomUUID();
+  const sizeOptionId = randomUUID();
+  const colourOptionId = randomUUID();
+  const prefix = randomUUID().slice(0, 6);
+
+  // Insert product
+  await admin`
+    INSERT INTO products (id, tenant_id, title, status, created_at, updated_at)
+    VALUES (${productId}, ${tenantId}, ${`Over-Cap ${prefix}`}, 'draft', now(), now())`;
+
+  // Insert slug
+  await admin`
+    INSERT INTO url_slugs (tenant_id, slug, entity_type, entity_id, is_canonical, created_at)
+    VALUES (${tenantId}, ${`over-cap-${prefix}`}, 'product', ${productId}, true, now())`;
+
+  // Insert two option axes to create a matrix
+  await admin`
+    INSERT INTO product_options (id, tenant_id, product_id, name, position)
+    VALUES (${sizeOptionId}, ${tenantId}, ${productId}, 'Size', 0)`;
+
+  await admin`
+    INSERT INTO product_options (id, tenant_id, product_id, name, position)
+    VALUES (${colourOptionId}, ${tenantId}, ${productId}, 'Colour', 1)`;
+
+  // For 201 variants: 21 sizes × 10 colors (21 on first axis is intentional over-cap)
+  const sizeCount = 21;
+  const colourCount = Math.ceil(variantCount / sizeCount);
+
+  // Insert size option values
+  for (let s = 0; s < sizeCount; s++) {
+    const valueId = randomUUID();
+    await admin`
+      INSERT INTO product_option_values (id, tenant_id, option_id, value, position)
+      VALUES (${valueId}, ${tenantId}, ${sizeOptionId}, ${`S${s}`}, ${s})`;
+  }
+
+  // Insert colour option values
+  for (let c = 0; c < colourCount; c++) {
+    const valueId = randomUUID();
+    await admin`
+      INSERT INTO product_option_values (id, tenant_id, option_id, value, position)
+      VALUES (${valueId}, ${tenantId}, ${colourOptionId}, ${`C${c}`}, ${c})`;
+  }
+
+  // Insert variants in a grid pattern
+  let variantIndex = 0;
+  for (let s = 0; s < sizeCount && variantIndex < variantCount; s++) {
+    for (let c = 0; c < colourCount && variantIndex < variantCount; c++) {
+      const variantId = randomUUID();
+      const sku = `OC-${prefix}-${variantIndex}`;
+
+      // The options jsonb must be cast properly to avoid storing a string
+      await admin`
+        INSERT INTO product_variants (
+          id, tenant_id, product_id, sku, options, price_paise, weight_grams, position, created_at, updated_at
+        ) VALUES (
+          ${variantId}, ${tenantId}, ${productId}, ${sku},
+          ${JSON.stringify({ Size: `S${s}`, Colour: `C${c}` })}::text::jsonb,
+          1000, 100, ${variantIndex}, now(), now()
+        )`;
+
+      variantIndex++;
+    }
+  }
+
+  return productId;
+}
+
+/**
+ * Creates a valid product payload with the specified number of variants.
+ * Uses a two-axis matrix to avoid hitting the 50-value-per-axis cap while
+ * still reaching 200 variants (e.g., 20 sizes × 10 colors = 200).
+ */
+function payloadWithVariants(count: number): Record<string, unknown> {
+  const prefix = randomUUID().slice(0, 6);
+
+  // For 200 variants: 20 sizes × 10 colors
+  const sizeCount = 20;
+  const colourCount = Math.ceil(count / sizeCount);
+
+  const sizes: string[] = [];
+  const colours: string[] = [];
+  const variants: Record<string, unknown>[] = [];
+
+  for (let s = 0; s < sizeCount; s++) {
+    sizes.push(`S${s}`);
+  }
+
+  for (let c = 0; c < colourCount; c++) {
+    colours.push(`C${c}`);
+  }
+
+  let variantIndex = 0;
+  for (let s = 0; s < sizeCount && variantIndex < count; s++) {
+    for (let c = 0; c < colourCount && variantIndex < count; c++) {
+      variants.push({
+        sku: `TRIM-${prefix}-${variantIndex}`,
+        options: { Size: `S${s}`, Colour: `C${c}` },
+        price: "10",
+        weightGrams: 100,
+      });
+      variantIndex++;
+    }
+  }
+
+  return {
+    title: "Trimmed Product",
+    status: "draft",
+    axes: [
+      { name: "Size", values: sizes },
+      { name: "Colour", values: colours },
+    ],
+    variants,
+  };
+}
+
 beforeAll(async () => {
   // Every catalog write in this suite calls `purgeStorefrontCache`, and
   // the repo `.env` this config loads sets the origin to
@@ -197,6 +327,15 @@ afterEach(() => {
 
 afterAll(async () => {
   await closeRedis();
+  if (createdTenants.length > 0) {
+    await admin`DELETE FROM tenants WHERE id IN ${admin(createdTenants)}`;
+  }
+  if (createdUsers.length > 0) {
+    await admin`DELETE FROM users WHERE id IN ${admin(createdUsers)}`;
+  }
+  if (createdPlans.size > 0) {
+    await admin`DELETE FROM plans WHERE id IN ${admin([...createdPlans])}`;
+  }
   await admin.end();
   await closeConnections();
 });
@@ -474,6 +613,22 @@ describe("POST /api/products — refusals", () => {
     const { status } = await createProduct(productPayload({ title: "Empty", variants: [] }));
     expect(status).toBe(422);
   });
+
+  it("refuses a fractional weight rather than truncating it", async () => {
+    sessionToken = ownerToken;
+
+    // Guards the ProductForm fix: the form now sends Number(input) verbatim,
+    // so "1.5" must be refused here — not rounded, not truncated.
+    const { status, data } = await createProduct(
+      productPayload({
+        variants: [{ sku: `FRAC-${randomUUID().slice(0, 8)}`, price: "100", weightGrams: 1.5 }],
+      }),
+    );
+
+    expect(status).toBe(422);
+    const issues = (data.error as { details: { issues: { path: string }[] } }).details.issues;
+    expect(issues.some((i) => i.path.includes("weightGrams"))).toBe(true);
+  });
 });
 
 describe("PUT /api/products/[id]", () => {
@@ -724,6 +879,23 @@ describe("PUT /api/products/[id]", () => {
     );
 
     expect(response.status).toBe(404);
+  });
+
+  it("lets a merchant trim an over-cap product back under the cap", async () => {
+    sessionToken = ownerToken;
+
+    // No code path creates an over-cap product; simulate the legacy case
+    // by inserting 201 variants directly (admin connection, like the
+    // suite's other direct-SQL fixtures), then save a trimmed payload.
+    const productId = await makeOverCapProduct(tenantA, 201);
+    const trimmed = payloadWithVariants(200);
+    const res = await updateProduct(productId, trimmed);
+    expect(res.status).toBe(200);
+
+    const live = await admin<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM product_variants
+      WHERE product_id = ${productId} AND deleted_at IS NULL`;
+    expect(live[0]!.n).toBe(200);
   });
 });
 

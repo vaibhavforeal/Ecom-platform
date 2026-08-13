@@ -69,6 +69,9 @@ const admin = postgres(migratorUrl, { max: 2, onnotice: () => {} });
 
 let actorUserId: string;
 
+const createdTenants: string[] = [];
+const createdPlans: Set<string> = new Set();
+
 /** A purge request as the console sends it, but built here by hand. */
 function purgeRequest(tenantId: string, tags: unknown, secret: string | null): Request {
   const headers: Record<string, string> = { "content-type": "application/json" };
@@ -127,10 +130,12 @@ async function makeTenant(): Promise<string> {
     INSERT INTO plans (id, code, name)
     VALUES (${randomUUID()}, ${"sf-" + randomUUID().slice(0, 8)}, 'Purge test plan')
     RETURNING id`;
+  createdPlans.add(plan!.id);
   const [tenant] = await admin<{ id: string }[]>`
     INSERT INTO tenants (id, slug, legal_name, display_name, plan_id, status)
     VALUES (${randomUUID()}, ${slug}, ${slug}, ${slug}, ${plan!.id}, 'active')
     RETURNING id`;
+  createdTenants.push(tenant!.id);
   return tenant!.id;
 }
 
@@ -202,9 +207,17 @@ beforeAll(async () => {
   const phone = "+9196" + String(Math.floor(Math.random() * 1e8)).padStart(8, "0");
   await admin`
     INSERT INTO users (id, phone_e164, name) VALUES (${actorUserId}, ${phone}, 'Purge test')`;
+  // Note: actorUserId is shared across all test fixtures, tracked separately below
 });
 
 afterAll(async () => {
+  if (createdTenants.length > 0) {
+    await admin`DELETE FROM tenants WHERE id IN ${admin(createdTenants)}`;
+  }
+  await admin`DELETE FROM users WHERE id = ${actorUserId}`;
+  if (createdPlans.size > 0) {
+    await admin`DELETE FROM plans WHERE id IN ${admin([...createdPlans])}`;
+  }
   await admin.end();
   await closeConnections();
 });
