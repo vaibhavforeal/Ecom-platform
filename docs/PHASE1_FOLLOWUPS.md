@@ -51,6 +51,31 @@ branch. One line each, naming the fixing commit:
 - **`packages/integrations` has no vitest config** — `b5bedca`: config added with
   `unstubEnvs: true`; stubs no longer leak across files.
 
+## Deferred polish from the hardening wave
+
+Triaged by the wave's final whole-branch review as safe to defer — none blocks
+anything, all are small:
+
+- `merchantFailureReason`'s `/invalid/i` branch is broad — a non-image error
+  containing "invalid" reads as a decode failure on the merchant screen. Anchor
+  to image-specific phrasings when next in the file. S3 SDK error classes
+  (AccessDenied etc.) also fall to the generic fallback.
+- When the production deployment manifest is first written: `TLS_ASK_SECRET`
+  must be exported to **Caddy's** process environment or `{$TLS_ASK_SECRET}`
+  substitutes empty and issuance 403s (fail-closed, but a silent-ops trap).
+  Add the sentence to the Caddyfile comment then.
+- `apps/storefront/tests/cache-purge.integration.test.ts` still mutates
+  `INTERNAL_API_SECRET`/`STOREFRONT_INTERNAL_ORIGIN` in `beforeAll` without
+  restore (the worker suite now restores; this one predates the idiom).
+- The console cache-purge suite tracks a single `planId` where its three
+  sibling suites use a `Set` — fragile if a second `makeTenant` call is added.
+- Test-suite leak verification counts only `tenants`; extend to `plans` and
+  `users` next time that area is touched (a plan-row leak slipped through
+  exactly this gap once already).
+- Dev-DB archaeology: ~95 `rc-`-prefixed tenants and ~1,247 test-phone users
+  remain from pre-cleanup runs (origin of `rc-` unidentified; users are
+  referenced by audit history). Harmless; sweep only with a SELECT first.
+
 ## Known limitations, by design
 
 - **A purge reaches one storefront process.** Multiple replicas need load-balancer
