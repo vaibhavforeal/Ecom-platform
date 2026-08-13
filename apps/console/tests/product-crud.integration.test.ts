@@ -474,6 +474,22 @@ describe("POST /api/products — refusals", () => {
     const { status } = await createProduct(productPayload({ title: "Empty", variants: [] }));
     expect(status).toBe(422);
   });
+
+  it("refuses a fractional weight rather than truncating it", async () => {
+    sessionToken = ownerToken;
+
+    // Guards the ProductForm fix: the form now sends Number(input) verbatim,
+    // so "1.5" must be refused here — not rounded, not truncated.
+    const { status, data } = await createProduct(
+      productPayload({
+        variants: [{ sku: `FRAC-${randomUUID().slice(0, 8)}`, price: "100", weightGrams: 1.5 }],
+      }),
+    );
+
+    expect(status).toBe(422);
+    const issues = (data.error as { details: { issues: { path: string }[] } }).details.issues;
+    expect(issues.some((i) => i.path.includes("weightGrams"))).toBe(true);
+  });
 });
 
 describe("PUT /api/products/[id]", () => {

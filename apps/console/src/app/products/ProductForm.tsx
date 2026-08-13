@@ -236,8 +236,12 @@ export function ProductForm({
         price: v.price,
         compareAt: v.compareAt,
         cost: v.cost,
-        weightGrams: Number.parseInt(v.weightGrams, 10),
-        lowStockAt: v.lowStockAt.trim() === "" ? null : Number.parseInt(v.lowStockAt, 10),
+        // Send what the merchant typed, as a number. The server's z.int() is
+        // the validator — parseInt here silently truncated "1.5" to 1, which
+        // the server then accepted. Blank stays null so it is refused loudly
+        // (a blank weight would otherwise quote shipping at zero).
+        weightGrams: v.weightGrams.trim() === "" ? null : Number(v.weightGrams),
+        lowStockAt: v.lowStockAt.trim() === "" ? null : Number(v.lowStockAt),
         imageMediaId: v.imageMediaId || null,
         isActive: v.isActive,
       })),
