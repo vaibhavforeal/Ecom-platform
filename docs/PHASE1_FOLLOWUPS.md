@@ -40,9 +40,9 @@ missed.
 - **`pending`/`failed` media renders a placeholder, not the original.** Accepted:
   a `pending` row has NULL dimensions, so rendering it would guarantee a wrong
   aspect ratio and a layout shift on every non-square image.
-- **`INTERNAL_API_SECRET` now guards two capabilities** — Caddy's on-demand TLS
-  `ask` and the cache purge. The purge fails closed; `verify-domain` skips its
-  check when the secret is unset. Worth scoping or rotating separately.
+- **TLS ask secret is query-string-only.** `TLS_ASK_SECRET` rides the Caddyfile's
+  ask URL (`?secret={$TLS_ASK_SECRET}`) because Caddy's `on_demand_tls { ask }`
+  directive cannot send headers. Dedicated credential, not shared with the purge.
 
 ## Process notes worth keeping
 
