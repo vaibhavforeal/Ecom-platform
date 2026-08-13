@@ -26,6 +26,7 @@ const admin = postgres(migratorUrl, { max: 2, onnotice: () => {} });
 
 let tenantA: string;
 let tenantB: string;
+let planId: string;
 
 /** The same bytes, hashed. Shared by both tenants below on purpose. */
 const CHECKSUM = "0f9c1e2b3a4d5c6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6";
@@ -50,6 +51,7 @@ beforeAll(async () => {
     INSERT INTO plans (id, code, name)
     VALUES (${randomUUID()}, ${"chk-" + randomUUID().slice(0, 8)}, 'Checksum test plan')
     RETURNING id`;
+  planId = plan!.id;
 
   const mk = async () => {
     const slug = "chk-" + randomUUID().slice(0, 12);
@@ -66,6 +68,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await admin`DELETE FROM tenants WHERE id IN (${tenantA}, ${tenantB})`;
+  await admin`DELETE FROM plans WHERE id = ${planId}`;
   await admin.end({ timeout: 5 });
   await closeConnections();
 });

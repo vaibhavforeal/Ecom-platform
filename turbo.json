@@ -44,7 +44,8 @@
     },
     "test:integration": {
       "cache": false,
-      "outputs": []
+      "outputs": [],
+      "dependsOn": ["^test:integration"]
     }
   }
 }

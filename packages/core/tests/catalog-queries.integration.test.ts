@@ -31,6 +31,7 @@ let tenantB: string;
 let tenantC: string;
 let shirtId: string;
 let categoryId: string;
+let planId: string;
 
 const SHIRT_SLUG = "q-cotton-shirt";
 const SHIRT_OLD_SLUG = "q-cotton-shirt-old";
@@ -79,6 +80,7 @@ beforeAll(async () => {
     INSERT INTO plans (id, code, name)
     VALUES (${randomUUID()}, ${"q-" + randomUUID().slice(0, 8)}, 'Query test plan')
     RETURNING id`;
+  planId = plan!.id;
 
   const mkTenant = async (slug: string) => {
     const [t] = await admin<{ id: string }[]>`
@@ -232,6 +234,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await admin`DELETE FROM tenants WHERE id IN (${tenantA}, ${tenantB}, ${tenantC})`;
+  await admin`DELETE FROM plans WHERE id = ${planId}`;
   await admin.end({ timeout: 5 });
   await closeConnections();
 });

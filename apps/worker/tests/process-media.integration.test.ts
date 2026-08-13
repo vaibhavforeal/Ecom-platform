@@ -50,6 +50,11 @@ type MediaRow = {
 let tenantA: string;
 let tenantB: string;
 
+const createdTenants: string[] = [];
+let planId: string;
+let originalInternalSecret: string | undefined;
+let originalStorefrontOrigin: string | undefined;
+
 async function readMedia(id: string): Promise<MediaRow> {
   const rows = await admin<MediaRow[]>`
     SELECT status, width, height, checksum, derivatives, processing_error, storage_key
@@ -227,6 +232,8 @@ const PURGE_SECRET = "worker-purge-secret-77c31e";
 beforeAll(async () => {
   const started = await startStubStorefront();
   purgeServer = started.server;
+  originalStorefrontOrigin = process.env.STOREFRONT_INTERNAL_ORIGIN;
+  originalInternalSecret = process.env.INTERNAL_API_SECRET;
   process.env.STOREFRONT_INTERNAL_ORIGIN = started.origin;
   process.env.INTERNAL_API_SECRET = PURGE_SECRET;
 
@@ -234,6 +241,7 @@ beforeAll(async () => {
     INSERT INTO plans (id, code, name)
     VALUES (${randomUUID()}, ${"m-" + randomUUID().slice(0, 8)}, 'Media test plan')
     RETURNING id`;
+  planId = plan!.id;
 
   const mkTenant = async () => {
     const slug = "m-" + randomUUID().slice(0, 12);
@@ -241,6 +249,7 @@ beforeAll(async () => {
       INSERT INTO tenants (id, slug, legal_name, display_name, plan_id, status)
       VALUES (${randomUUID()}, ${slug}, ${slug}, ${slug}, ${plan!.id}, 'active')
       RETURNING id`;
+    createdTenants.push(t!.id);
     return t!.id;
   };
 
@@ -254,9 +263,24 @@ beforeEach(() => {
 
 afterAll(async () => {
   await new Promise<void>((resolve) => purgeServer.close(() => resolve()));
+  if (createdTenants.length > 0) {
+    await admin`DELETE FROM tenants WHERE id IN ${admin(createdTenants)}`;
+  }
+  await admin`DELETE FROM plans WHERE id = ${planId}`;
   await admin.end();
   await closeConnections();
   await rm(MEDIA_ROOT, { recursive: true, force: true });
+  // Restore environment variables
+  if (originalStorefrontOrigin !== undefined) {
+    process.env.STOREFRONT_INTERNAL_ORIGIN = originalStorefrontOrigin;
+  } else {
+    delete process.env.STOREFRONT_INTERNAL_ORIGIN;
+  }
+  if (originalInternalSecret !== undefined) {
+    process.env.INTERNAL_API_SECRET = originalInternalSecret;
+  } else {
+    delete process.env.INTERNAL_API_SECRET;
+  }
 });
 
 describe("processMedia", () => {

@@ -47,21 +47,28 @@ let tenantB: string;
 let ownerToken: string;
 let cashierToken: string;
 
+const createdTenants: string[] = [];
+const createdUsers: string[] = [];
+const createdPlans: Set<string> = new Set();
+
 async function makeTenant(): Promise<string> {
   const slug = "csv-" + randomUUID().slice(0, 10);
   const [plan] = await admin<{ id: string }[]>`
     INSERT INTO plans (id, code, name)
     VALUES (${randomUUID()}, ${"csv-" + randomUUID().slice(0, 8)}, 'CSV test plan')
     RETURNING id`;
+  createdPlans.add(plan!.id);
   const [tenant] = await admin<{ id: string }[]>`
     INSERT INTO tenants (id, slug, legal_name, display_name, plan_id, status)
     VALUES (${randomUUID()}, ${slug}, ${slug}, ${slug}, ${plan!.id}, 'active')
     RETURNING id`;
+  createdTenants.push(tenant!.id);
   return tenant!.id;
 }
 
 async function makeSession(tenantId: string, role: string): Promise<string> {
   const userId = randomUUID();
+  createdUsers.push(userId);
   const phone = "+9198" + String(Math.floor(Math.random() * 1e8)).padStart(8, "0");
   await admin`INSERT INTO users (id, phone_e164, name) VALUES (${userId}, ${phone}, 'CSV test')`;
   await admin`
@@ -196,6 +203,15 @@ afterEach(() => {
 
 afterAll(async () => {
   await closeRedis();
+  if (createdTenants.length > 0) {
+    await admin`DELETE FROM tenants WHERE id IN ${admin(createdTenants)}`;
+  }
+  if (createdUsers.length > 0) {
+    await admin`DELETE FROM users WHERE id IN ${admin(createdUsers)}`;
+  }
+  if (createdPlans.size > 0) {
+    await admin`DELETE FROM plans WHERE id IN ${admin([...createdPlans])}`;
+  }
   await admin.end();
   await closeConnections();
 });
