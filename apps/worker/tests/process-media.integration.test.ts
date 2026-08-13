@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { rm } from "node:fs/promises";
 import { createServer } from "node:http";
 import type { Server } from "node:http";
@@ -136,8 +136,7 @@ async function fixtureImage(): Promise<Buffer> {
 
 /** Returns sha256 hex of given bytes, matching what the worker computes. */
 function sha256hex(bytes: Buffer): string {
-  const crypto = require("crypto");
-  return crypto.createHash("sha256").update(bytes).digest("hex");
+  return createHash("sha256").update(bytes).digest("hex");
 }
 
 function asDerivatives(value: unknown): MediaDerivative[] {
@@ -522,7 +521,7 @@ describe("processMedia", () => {
     // backfill computes X and would collide.
     const bytes = await fixtureImage(); // reuse the suite's smallest valid fixture
     const checksum = sha256hex(bytes);  // same hash the worker computes
-    const rowA = await givenReadyMedia(tenantA, { checksum, bytes });
+    await givenReadyMedia(tenantA, { checksum, bytes });
     const rowB = await givenPendingMedia(tenantA, { checksum: null, bytes });
 
     await processMedia({ tenantId: tenantA, mediaId: rowB.id });

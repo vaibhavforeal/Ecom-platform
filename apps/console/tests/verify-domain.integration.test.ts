@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 
 import { closeRedis } from "@platform/core";
 import { closeConnections } from "@platform/db";
