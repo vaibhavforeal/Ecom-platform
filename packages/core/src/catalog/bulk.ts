@@ -599,10 +599,10 @@ function changedFields(input: ProductWriteInput, existing: ConsoleProduct): stri
     const wasFilled = existing.summary !== null && existing.summary !== "";
     changed("summary", newSummary === null && wasFilled);
   }
-  if (cleanDescription(input.description) !== existing.description) {
-    const cleanedNew = cleanDescription(input.description);
+  const cleanedDescription = cleanDescription(input.description);
+  if (cleanedDescription !== existing.description) {
     const wasFilled = existing.description !== null && existing.description !== "";
-    changed("description", cleanedNew === null && wasFilled);
+    changed("description", cleanedDescription === null && wasFilled);
   }
   if (input.status !== existing.status) changed("status");
   if (input.productType !== existing.productType) changed("product type");
