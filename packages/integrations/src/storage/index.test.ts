@@ -97,4 +97,18 @@ describe("getStorage", () => {
 
     expect(storage.publicUrl("tenant/file.jpg")).toBe("https://cdn.example.com/tenant/file.jpg");
   });
+
+  it("treats a blank STORAGE_DRIVER as unset in development", async () => {
+    vi.stubEnv("NODE_ENV", "development");
+    vi.stubEnv("STORAGE_DRIVER", "");
+    const { getStorage } = await import("./index");
+    expect(() => getStorage()).not.toThrow(); // falls back to the local driver
+  });
+
+  it("treats a blank STORAGE_DRIVER as unset in production — refuses to default", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("STORAGE_DRIVER", "");
+    const { getStorage } = await import("./index");
+    expect(() => getStorage()).toThrow("STORAGE_DRIVER is required in production");
+  });
 });
