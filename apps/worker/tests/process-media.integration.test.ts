@@ -267,9 +267,6 @@ afterAll(async () => {
     await admin`DELETE FROM tenants WHERE id IN ${admin(createdTenants)}`;
   }
   await admin`DELETE FROM plans WHERE id = ${planId}`;
-  await admin.end();
-  await closeConnections();
-  await rm(MEDIA_ROOT, { recursive: true, force: true });
   // Restore environment variables
   if (originalStorefrontOrigin !== undefined) {
     process.env.STOREFRONT_INTERNAL_ORIGIN = originalStorefrontOrigin;
@@ -281,6 +278,9 @@ afterAll(async () => {
   } else {
     delete process.env.INTERNAL_API_SECRET;
   }
+  await admin.end();
+  await closeConnections();
+  await rm(MEDIA_ROOT, { recursive: true, force: true });
 });
 
 describe("processMedia", () => {
