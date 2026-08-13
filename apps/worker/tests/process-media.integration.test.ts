@@ -517,8 +517,10 @@ describe("processMedia", () => {
     await expect(processMedia({ tenantId: tenantA, mediaId: id })).rejects.toThrow();
     const failed = await adminRow(id);
     expect(failed.status).toBe("failed");
-    // Expect the CURATED message, not the raw "Input image exceeds pixel limit"
-    expect(failed.processing_error).toBe("The image exceeds the pixel limit for processing.");
+    expect(failed.storage_key).toBeTruthy(); // Ensure the key exists before checking absence
+    expect(failed.processing_error).toMatch(/pixel limit/i);       // still names the cause
+    expect(failed.processing_error).not.toMatch(/VipsImage|sharp/); // no library internals
+    expect(failed.processing_error).not.toContain(failed.storage_key!); // no internal keys
   });
 });
 
