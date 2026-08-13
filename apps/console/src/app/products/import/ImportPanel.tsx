@@ -226,6 +226,9 @@ function Results({ results }: { results: ImportProductResult[] }) {
                 >
                   {result.outcome}
                 </span>
+                {result.outcome === "updated" && result.changes.length > 0 && (
+                  <span className="changes">{result.changes.join(", ")}</span>
+                )}
               </td>
               <td style={{ textAlign: "right" }}>{result.variantsWritten}</td>
               <td style={{ textAlign: "right" }}>

@@ -245,7 +245,9 @@ async function applyProduct(
     ? existing.variants.filter((v) => !draft.variants.some((d) => d.sku === v.sku)).length
     : 0;
 
-  if (existing && !isChanged(merged.input, existing)) {
+  const changes = existing ? changedFields(merged.input, existing) : [];
+
+  if (existing && changes.length === 0) {
     return {
       handle: draft.handle,
       row: draft.row,
@@ -254,6 +256,7 @@ async function applyProduct(
       slug: existing.slug,
       variantsWritten: draft.variants.length,
       variantsRetained: retained,
+      changes: [],
     };
   }
 
@@ -277,6 +280,7 @@ async function applyProduct(
       slug: result.slug,
       variantsWritten: draft.variants.length,
       variantsRetained: retained,
+      changes: existing ? changes : [],
     };
   } catch (err) {
     // The write layer speaks in payload paths (`variants.2.sku`). The
@@ -566,7 +570,7 @@ function mergeAxes(
 // ───────────────────────────────────────────────────────────────
 
 /**
- * Whether writing `input` would alter anything already stored.
+ * Names the fields this import would change.
  *
  * This is what makes "export, re-import unchanged" a genuine no-op
  * rather than an idempotent rewrite. Calling the write layer anyway
@@ -580,49 +584,74 @@ function mergeAxes(
  * the description goes through the same sanitiser the write layer uses,
  * and the SEO object through the same three-key filter, or a re-import
  * of an already-sanitised description would read as an edit forever.
+ *
+ * Returns human-readable field labels. Empty array means no change.
  */
-function isChanged(input: ProductWriteInput, existing: ConsoleProduct): boolean {
-  if (input.title !== existing.title) return true;
-  if (slugify(input.slug ?? input.title, { fallback: "item" }) !== existing.slug) return true;
-  if (input.summary !== existing.summary) return true;
-  if (cleanDescription(input.description) !== existing.description) return true;
-  if (input.status !== existing.status) return true;
-  if (input.productType !== existing.productType) return true;
-  if (input.vendor !== existing.vendor) return true;
-  if (input.hsnCode !== existing.hsnCode) return true;
-  if (input.taxRateBps !== existing.taxRateBps) return true;
-  if (!sameStrings(input.tags, existing.tags)) return true;
+function changedFields(input: ProductWriteInput, existing: ConsoleProduct): string[] {
+  const changes: string[] = [];
+  const changed = (label: string, cleared = false) =>
+    changes.push(cleared ? `${label} (cleared)` : label);
+
+  if (input.title !== existing.title) changed("title");
+  if (slugify(input.slug ?? input.title, { fallback: "item" }) !== existing.slug) changed("slug");
+  if (input.summary !== existing.summary) {
+    const newSummary = input.summary;
+    const wasFilled = existing.summary !== null && existing.summary !== "";
+    changed("summary", newSummary === null && wasFilled);
+  }
+  if (cleanDescription(input.description) !== existing.description) {
+    const cleanedNew = cleanDescription(input.description);
+    const wasFilled = existing.description !== null && existing.description !== "";
+    changed("description", cleanedNew === null && wasFilled);
+  }
+  if (input.status !== existing.status) changed("status");
+  if (input.productType !== existing.productType) changed("product type");
+  if (input.vendor !== existing.vendor) {
+    const newVendor = input.vendor;
+    const wasFilled = existing.vendor !== null && existing.vendor !== "";
+    changed("vendor", newVendor === null && wasFilled);
+  }
+  if (input.hsnCode !== existing.hsnCode) changed("HSN code");
+  if (input.taxRateBps !== existing.taxRateBps) changed("tax rate");
+  if (!sameStrings(input.tags, existing.tags)) changed("tags");
   if (
     JSON.stringify(cleanSeo(input.seo)) !== JSON.stringify(cleanSeo(seoOf(existing.seo)))
   ) {
-    return true;
+    changed("SEO");
   }
-  if (!sameAxes(input.axes, existing.axes)) return true;
+  if (!sameAxes(input.axes, existing.axes)) changed("options");
 
-  if (input.variants.length !== existing.variants.length) return true;
-  for (const [i, variant] of input.variants.entries()) {
-    // Position is written from array order, so index-for-index.
-    const stored = existing.variants[i];
-    if (!stored) return true;
-    if (
-      variant.sku !== stored.sku ||
-      variant.barcode !== stored.barcode ||
-      optionKey(variant.options) !== optionKey(stored.options) ||
-      variant.pricePaise !== stored.pricePaise ||
-      variant.compareAtPaise !== stored.compareAtPaise ||
-      variant.costPaise !== stored.costPaise ||
-      variant.weightGrams !== stored.weightGrams ||
-      variant.lowStockAt !== stored.lowStockAt ||
-      variant.imageMediaId !== stored.imageMediaId ||
-      variant.isActive !== stored.isActive
-    ) {
-      return true;
+  if (input.variants.length !== existing.variants.length) {
+    changed("variants");
+  } else {
+    for (const [i, variant] of input.variants.entries()) {
+      // Position is written from array order, so index-for-index.
+      const stored = existing.variants[i];
+      if (!stored) {
+        changed("variants");
+        break;
+      }
+      if (
+        variant.sku !== stored.sku ||
+        variant.barcode !== stored.barcode ||
+        optionKey(variant.options) !== optionKey(stored.options) ||
+        variant.pricePaise !== stored.pricePaise ||
+        variant.compareAtPaise !== stored.compareAtPaise ||
+        variant.costPaise !== stored.costPaise ||
+        variant.weightGrams !== stored.weightGrams ||
+        variant.lowStockAt !== stored.lowStockAt ||
+        variant.imageMediaId !== stored.imageMediaId ||
+        variant.isActive !== stored.isActive
+      ) {
+        changed("variants");
+        break;
+      }
     }
   }
 
   // Categories, collections and the gallery are copied from `existing`
   // wholesale in `mergeProduct`, so there is nothing here to compare.
-  return false;
+  return changes;
 }
 
 /**

@@ -573,6 +573,14 @@ export type ImportProductResult = {
   variantsWritten: number;
   /** Live variants NOT named in the file. Kept, never deleted. */
   variantsRetained: number;
+  /**
+   * For an `updated` row: the fields this import changes, e.g.
+   * `["title", "description (cleared)", "variants"]`. A "(cleared)"
+   * suffix means a stored value becomes empty — the preview is the
+   * merchant's only defence before committing a clear. Empty for
+   * `created` and `skipped` rows.
+   */
+  changes: string[];
 };
 
 export type ImportReport = {

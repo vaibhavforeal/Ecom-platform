@@ -512,6 +512,28 @@ describe("what an import actually changes", () => {
     expect(gone!.summary).toBeNull();
   });
 
+  it("dry run names the fields an update changes, flagging clears", async () => {
+    const tenant = await makeTenant();
+    sessionToken = await makeSession(tenant, "owner");
+    // Seed a product with a description via the normal import path.
+    const seed =
+      "handle,title,price,weight_grams,option1_name,option1_value,sku,description\r\n" +
+      "diff-tee,Diff Tee,499.00,180,Size,M,DIFF-M,<p>Keep me.</p>\r\n";
+    await importCsv(seed, { commit: true });
+
+    // Same product, new title, description column present but blank.
+    const update =
+      "handle,title,price,weight_grams,option1_name,option1_value,sku,description\r\n" +
+      "diff-tee,Diff Tee Renamed,499.00,180,Size,M,DIFF-M,\r\n";
+    const { report } = await importCsv(update, { commit: false });
+
+    expect(report!.updated).toBe(1);
+    const result = report!.results.find((r) => r.handle === "diff-tee")!;
+    expect(result.changes).toContain("title");
+    expect(result.changes).toContain("description (cleared)");
+    expect(result.changes).not.toContain("variants");
+  });
+
   it("does not put a switched-off variant back on sale through a blank cell", async () => {
     const tenant = await makeTenant();
     sessionToken = await makeSession(tenant, "owner");
