@@ -1,6 +1,6 @@
 import { unstable_cache } from "next/cache";
 
-import { catalogTags, sanitizeDescriptionHtml } from "@platform/core/catalog";
+import { catalogTags } from "@platform/core/catalog";
 import {
   getCollectionById,
   getProductById,
@@ -8,6 +8,7 @@ import {
   listProducts,
   listSitemapEntries,
   resolveStorefrontSlug,
+  sanitizeDescriptionHtml,
 } from "@platform/core/catalog/server";
 import type { ListOptions } from "@platform/core/catalog/server";
 

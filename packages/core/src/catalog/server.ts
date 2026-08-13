@@ -12,3 +12,4 @@ export * from "./console-queries";
 export * from "./writes";
 export * from "./bulk";
 export * from "./purge";
+export * from "./sanitize-html";

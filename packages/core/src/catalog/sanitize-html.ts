@@ -1,4 +1,7 @@
 import sanitizeHtml from "sanitize-html";
+import { ALLOWED_DESCRIPTION_TAGS, ALLOWED_LINK_SCHEMES } from "./description-policy";
+
+export * from "./description-policy";
 
 /**
  * Merchant-authored rich text, made safe to put in the DOM.
@@ -30,51 +33,13 @@ import sanitizeHtml from "sanitize-html";
  *     a WhatsApp preview, an AI description rewriter — has to remember,
  *     and the one that forgets is the breach.
  *
- * Pure — no database, no filesystem, no network — which is why it sits
- * in the client-safe `@platform/core/catalog` barrel rather than in
- * `/server`. One honest caveat: `sanitize-html` depends on `postcss`,
- * which reads `fs`, so this module is tree-shaken out of the storefront's
- * client bundle rather than being small enough to ship there. Nothing
- * needs it in the browser — sanitising happens once, on write — and a
- * client component that imported it would fail the build loudly, which
- * is the right failure.
+ * This module lives behind `@platform/core/catalog/server`. The pure
+ * `@platform/core/catalog` barrel must never re-export it: under
+ * Turbopack a client import would not fail the build — it would silently
+ * ship sanitize-html (~190 kB with postcss) to browsers. The
+ * `catalog/server` barrel also pulls the postgres driver, whose `fs`/`net`
+ * imports DO still hard-fail a client build, which is the guard.
  */
-
-/**
- * What a merchant may write.
- *
- * Structure and emphasis, nothing else. Notably absent and deliberately
- * so: `img` and `video` (media belongs in the gallery, where it is
- * validated, resized and served from our own storage), `table` (a
- * pasted Word table is a layout bug on a phone), `span`/`div` and
- * `class` (a merchant restyling the page breaks the theme), and `h1`
- * (the PDP already has one — a second splits the document outline).
- */
-export const ALLOWED_DESCRIPTION_TAGS = [
-  "p",
-  "br",
-  "strong",
-  "em",
-  "u",
-  "ul",
-  "ol",
-  "li",
-  "h2",
-  "h3",
-  "h4",
-  "a",
-  "blockquote",
-] as const;
-
-/**
- * The only URL schemes a link may use.
- *
- * `javascript:` is script execution by another name. `data:` can carry
- * `text/html`, which is same-origin script execution one click away.
- * Everything else (`vbscript:`, `file:`, custom app schemes) has no
- * business in a product description.
- */
-export const ALLOWED_LINK_SCHEMES = ["http:", "https:", "mailto:"] as const;
 
 /** Forced onto every surviving link. See `linkAttributes`. */
 const LINK_REL = "nofollow noopener";

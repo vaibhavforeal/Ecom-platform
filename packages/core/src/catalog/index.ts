@@ -15,5 +15,5 @@ export * from "./cache-tags";
 export * from "./options";
 export * from "./money";
 export * from "./categories";
-export * from "./sanitize-html";
+export * from "./description-policy";
 export * from "./csv";

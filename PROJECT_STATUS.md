@@ -316,12 +316,15 @@ If the database volume survived, the two demo tenants are still seeded. If not:
   this. Every id a payload names is checked with an explicit SELECT
   inside `withTenant` before it is written (`assertVisible` in
   `catalog/writes.ts`); there is an integration test for it.
-- **`sanitize-html` pulls in `postcss`, which reads `fs`.** It lives in
-  the client-safe `@platform/core/catalog` barrel because the module
-  itself is pure, and webpack tree-shakes it out of both apps' client
-  bundles — verified by grepping `.next/static/chunks`. A client
-  component that imported `sanitizeDescriptionHtml` would fail the build,
-  which is the right failure: nothing needs it in a browser.
+- **`sanitize-html` lives behind `@platform/core/catalog/server`**, not
+  the pure barrel. Under Turbopack a client import would not fail the
+  build — it would silently ship sanitize-html (~190 kB with postcss) to
+  browsers. The `catalog/server` barrel also pulls the postgres driver,
+  whose `fs`/`net` imports DO still hard-fail a client build, which is the
+  guard. The two policy constants (`ALLOWED_DESCRIPTION_TAGS`,
+  `ALLOWED_LINK_SCHEMES`) live in `description-policy.ts` and are
+  re-exported by the pure barrel so client components (the console's
+  editor toolbar) can import them without dragging in the sanitiser.
 - **`product_variants` has two PARTIAL unique indexes** over
   `deleted_at IS NULL` — one on SKU, one on the option combination. A
   save that swaps two variants' SKUs collides mid-UPDATE if the rows are
