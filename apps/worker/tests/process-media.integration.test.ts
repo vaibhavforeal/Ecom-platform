@@ -44,6 +44,7 @@ type MediaRow = {
   checksum: string | null;
   derivatives: unknown;
   processing_error: string | null;
+  storage_key?: string | null;
 };
 
 let tenantA: string;
@@ -51,33 +52,87 @@ let tenantB: string;
 
 async function readMedia(id: string): Promise<MediaRow> {
   const rows = await admin<MediaRow[]>`
-    SELECT status, width, height, checksum, derivatives, processing_error
+    SELECT status, width, height, checksum, derivatives, processing_error, storage_key
     FROM media WHERE id = ${id}`;
   const row = rows[0];
   if (!row) throw new Error(`media ${id} vanished`);
   return row;
 }
 
+/** Alias for readMedia — matches task brief nomenclature. */
+const adminRow = readMedia;
+
 /** Stores the bytes and inserts the `pending` row the upload endpoint would. */
 async function givenPendingMedia(
   tenantId: string,
-  bytes: Buffer,
-  opts: { mimeType: string; ext: string; store?: boolean },
+  opts: { bytes?: Buffer; checksum?: string | null; mimeType?: string; ext?: string; store?: boolean },
 ): Promise<{ id: string; checksum: string; storageKey: string }> {
-  const checksum = await sha256(bytes);
-  const storageKey = mediaStorageKey({ tenantId, checksum, ext: opts.ext });
+  const bytes = opts.bytes ?? (await fixtureImage());
+  const checksum = opts.checksum !== undefined ? opts.checksum : await sha256(bytes);
+  const mimeType = opts.mimeType ?? "image/png";
+  const ext = opts.ext ?? "png";
+  // Use a unique key per test row to avoid storage_key collisions when
+  // testing multiple rows with identical bytes.
+  const uniqueKey = checksum ?? randomUUID();
+  const storageKey = mediaStorageKey({ tenantId, checksum: uniqueKey, ext });
 
   if (opts.store !== false) {
-    await getStorage().put(storageKey, bytes, { contentType: opts.mimeType });
+    await getStorage().put(storageKey, bytes, { contentType: mimeType });
   }
 
   const id = randomUUID();
   await admin`
     INSERT INTO media (id, tenant_id, storage_key, mime_type, byte_size, checksum, status)
-    VALUES (${id}, ${tenantId}, ${storageKey}, ${opts.mimeType}, ${bytes.length},
+    VALUES (${id}, ${tenantId}, ${storageKey}, ${mimeType}, ${bytes.length},
             ${checksum}, 'pending')`;
 
+  return { id, checksum: checksum ?? "", storageKey };
+}
+
+/** Inserts a `ready` row with derivatives already built. */
+async function givenReadyMedia(
+  tenantId: string,
+  opts: { checksum: string; bytes: Buffer },
+): Promise<{ id: string; checksum: string; storageKey: string }> {
+  const { checksum, bytes } = opts;
+  const storageKey = mediaStorageKey({ tenantId, checksum, ext: "png" });
+
+  await getStorage().put(storageKey, bytes, { contentType: "image/png" });
+
+  const metadata = await sharp(bytes).metadata();
+  const derivatives: MediaDerivative[] = [
+    {
+      format: "avif",
+      width: metadata.width ?? 100,
+      height: metadata.height ?? 100,
+      storageKey: derivativeStorageKey({ tenantId, checksum, width: metadata.width ?? 100, format: "avif" }),
+      byteSize: 1234,
+    },
+  ];
+
+  const id = randomUUID();
+  await admin`
+    INSERT INTO media (id, tenant_id, storage_key, mime_type, byte_size, checksum, status, width, height, derivatives)
+    VALUES (${id}, ${tenantId}, ${storageKey}, ${"image/png"}, ${bytes.length},
+            ${checksum}, 'ready', ${metadata.width ?? 100}, ${metadata.height ?? 100},
+            ${JSON.stringify(derivatives)}::text::jsonb)`;
+
   return { id, checksum, storageKey };
+}
+
+/** Returns a minimal valid PNG fixture. */
+async function fixtureImage(): Promise<Buffer> {
+  return sharp({
+    create: { width: 100, height: 100, channels: 3, background: { r: 50, g: 100, b: 150 } },
+  })
+    .png()
+    .toBuffer();
+}
+
+/** Returns sha256 hex of given bytes, matching what the worker computes. */
+function sha256hex(bytes: Buffer): string {
+  const crypto = require("crypto");
+  return crypto.createHash("sha256").update(bytes).digest("hex");
 }
 
 function asDerivatives(value: unknown): MediaDerivative[] {
@@ -212,7 +267,8 @@ describe("processMedia", () => {
       .png()
       .toBuffer();
 
-    const { id, checksum } = await givenPendingMedia(tenantA, png, {
+    const { id, checksum } = await givenPendingMedia(tenantA, {
+      bytes: png,
       mimeType: "image/png",
       ext: "png",
     });
@@ -298,7 +354,8 @@ describe("processMedia", () => {
       .jpeg()
       .toBuffer();
 
-    const { id } = await givenPendingMedia(tenantA, jpeg, {
+    const { id } = await givenPendingMedia(tenantA, {
+      bytes: jpeg,
       mimeType: "image/jpeg",
       ext: "jpg",
     });
@@ -350,7 +407,7 @@ describe("processMedia", () => {
       .png()
       .toBuffer();
 
-    const { id } = await givenPendingMedia(tenantA, tiny, { mimeType: "image/png", ext: "png" });
+    const { id } = await givenPendingMedia(tenantA, { bytes: tiny, mimeType: "image/png", ext: "png" });
 
     await processMedia({ tenantId: tenantA, mediaId: id });
 
@@ -379,7 +436,7 @@ describe("processMedia", () => {
     const bomb = bombPng(10_000, 10_000);
     expect(bomb.length).toBeLessThan(200);
 
-    const { id } = await givenPendingMedia(tenantA, bomb, { mimeType: "image/png", ext: "png" });
+    const { id } = await givenPendingMedia(tenantA, { bytes: bomb, mimeType: "image/png", ext: "png" });
 
     await expect(processMedia({ tenantId: tenantA, mediaId: id })).rejects.toThrow(
       /pixel limit/i,
@@ -398,7 +455,8 @@ describe("processMedia", () => {
       .png()
       .toBuffer();
 
-    const { id } = await givenPendingMedia(tenantA, png, {
+    const { id } = await givenPendingMedia(tenantA, {
+      bytes: png,
       mimeType: "image/png",
       ext: "png",
       store: false,
@@ -421,7 +479,7 @@ describe("processMedia", () => {
       .png()
       .toBuffer();
 
-    const { id } = await givenPendingMedia(tenantA, png, { mimeType: "image/png", ext: "png" });
+    const { id } = await givenPendingMedia(tenantA, { bytes: png, mimeType: "image/png", ext: "png" });
 
     // RLS returns zero rows rather than an error, so a job that mixed up
     // its tenant would silently do nothing — or, if the job filtered by
@@ -432,6 +490,35 @@ describe("processMedia", () => {
     expect(row.status).toBe("pending");
     expect(row.processing_error).toBeNull();
     expect(asDerivatives(row.derivatives)).toHaveLength(0);
+  });
+
+  it("adopts a checksum collision instead of stranding the row as failed", async () => {
+    // Row A: ready, owns checksum X (insert directly with the checksum of
+    // the fixture bytes). Row B: pending, checksum NULL, same bytes — the
+    // backfill computes X and would collide.
+    const bytes = await fixtureImage(); // reuse the suite's smallest valid fixture
+    const checksum = sha256hex(bytes);  // same hash the worker computes
+    const rowA = await givenReadyMedia(tenantA, { checksum, bytes });
+    const rowB = await givenPendingMedia(tenantA, { checksum: null, bytes });
+
+    await processMedia({ tenantId: tenantA, mediaId: rowB.id });
+
+    const b = await adminRow(rowB.id);
+    expect(b.status).toBe("ready");
+    expect(b.checksum).toBeNull();          // NULLs are distinct under the unique index
+    expect(asDerivatives(b.derivatives).length).toBeGreaterThan(0);
+    expect(b.processing_error).toBeNull();
+  });
+
+  it("writes a merchant-readable failure reason, and the raw error only to the log", async () => {
+    // Use slightly different dimensions from the existing bomb test to avoid storage_key collision
+    const bomb = bombPng(10_001, 10_001);
+    const { id } = await givenPendingMedia(tenantA, { bytes: bomb, mimeType: "image/png", ext: "png" });
+    await expect(processMedia({ tenantId: tenantA, mediaId: id })).rejects.toThrow();
+    const failed = await adminRow(id);
+    expect(failed.status).toBe("failed");
+    // Expect the CURATED message, not the raw "Input image exceeds pixel limit"
+    expect(failed.processing_error).toBe("The image exceeds the pixel limit for processing.");
   });
 });
 
@@ -453,7 +540,7 @@ describe("processMedia purges the storefront when the row goes ready", () => {
       .png()
       .toBuffer();
 
-    const { id } = await givenPendingMedia(tenantA, png, { mimeType: "image/png", ext: "png" });
+    const { id } = await givenPendingMedia(tenantA, { bytes: png, mimeType: "image/png", ext: "png" });
 
     await processMedia({ tenantId: tenantA, mediaId: id });
 
@@ -482,7 +569,8 @@ describe("processMedia purges the storefront when the row goes ready", () => {
       .toBuffer();
 
     // The original is never stored, so the job throws where it reads it.
-    const { id } = await givenPendingMedia(tenantA, png, {
+    const { id } = await givenPendingMedia(tenantA, {
+      bytes: png,
       mimeType: "image/png",
       ext: "png",
       store: false,
@@ -504,7 +592,7 @@ describe("processMedia purges the storefront when the row goes ready", () => {
       .png()
       .toBuffer();
 
-    const { id } = await givenPendingMedia(tenantA, png, { mimeType: "image/png", ext: "png" });
+    const { id } = await givenPendingMedia(tenantA, { bytes: png, mimeType: "image/png", ext: "png" });
 
     const origin = process.env.STOREFRONT_INTERNAL_ORIGIN;
     // Port 1 — privileged, nothing listens, refused immediately rather

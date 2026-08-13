@@ -44,6 +44,49 @@ const DERIVATIVE_CACHE_CONTROL = "public, max-age=31536000, immutable";
 /** Postgres would take more, but a stack trace is not a UI string. */
 const MAX_ERROR_LENGTH = 1_000;
 
+/**
+ * Is this error a 23505 constraint violation on media_tenant_checksum_idx?
+ *
+ * Drizzle wraps postgres.js errors but the constraint properties remain
+ * accessible on the error object itself (observed in test failure output).
+ * We also check err.cause in case it's wrapped.
+ */
+function isChecksumCollision(err: unknown): boolean {
+  if (typeof err !== "object" || err === null) return false;
+  const e = err as { code?: string; constraint_name?: string; cause?: unknown };
+
+  // Check the error itself
+  if (e.code === "23505" && e.constraint_name === "media_tenant_checksum_idx") {
+    return true;
+  }
+
+  // Check the cause chain
+  if (e.cause && typeof e.cause === "object") {
+    const cause = e.cause as { code?: string; constraint_name?: string };
+    if (cause.code === "23505" && cause.constraint_name === "media_tenant_checksum_idx") {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * processing_error feeds the merchant's screen verbatim (ProductForm
+ * renders it), so it holds curated sentences only. The raw error goes
+ * to the structured log where an operator can see it.
+ */
+function merchantFailureReason(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err);
+  if (/pixel limit|exceeds.*pixel/i.test(raw))
+    return "The image exceeds the pixel limit for processing.";
+  if (/unsupported image format|source file|corrupt|premature end|invalid/i.test(raw))
+    return "The file could not be decoded as an image.";
+  if (/ENOENT|NoSuchKey|not found/i.test(raw))
+    return "The original file could not be read from storage.";
+  return "Processing failed inside the platform. Uploading the same file again retries it.";
+}
+
 function encode(pipeline: Sharp, format: ImageFormat): Sharp {
   switch (format) {
     case "avif":
@@ -115,7 +158,13 @@ async function generateDerivatives(job: ProcessMediaJob): Promise<ProcessMediaRe
 
     const metadata = await sharp(bytes, { limitInputPixels: MAX_IMAGE_PIXELS }).metadata();
     if (!metadata.width || !metadata.height) {
-      throw new Error(`Could not read image dimensions from ${row.storageKey}`);
+      // Log the storage key separately — it must not reach processing_error.
+      console.error(JSON.stringify({
+        level: "error",
+        event: "media.dimension_read_failed",
+        mediaId, tenantId, storageKey: row.storageKey,
+      }));
+      throw new Error("Could not read the image's dimensions.");
     }
 
     /**
@@ -173,24 +222,52 @@ async function generateDerivatives(job: ProcessMediaJob): Promise<ProcessMediaRe
       });
     }
 
-    await withTenant(tenantId, async (tx) => {
-      await tx
-        .update(media)
-        .set({
-          status: "ready",
-          width,
-          height,
-          checksum,
-          derivatives,
-          processingError: null,
-          updatedAt: new Date(),
-        })
-        .where(eq(media.id, mediaId));
-    });
+    const markReady = async (checksumValue: string | null) => {
+      await withTenant(tenantId, async (tx) => {
+        await tx
+          .update(media)
+          .set({
+            status: "ready",
+            width,
+            height,
+            checksum: checksumValue,
+            derivatives,
+            processingError: null,
+            updatedAt: new Date(),
+          })
+          .where(eq(media.id, mediaId));
+      });
+    };
+
+    try {
+      await markReady(checksum);
+    } catch (err) {
+      if (!isChecksumCollision(err)) throw err;
+      // Another row in this tenant already owns these bytes' checksum —
+      // possible only on backfill (the upload route dedupes by checksum
+      // before inserting). The derivatives are already built and stored;
+      // completing the row with a NULL checksum keeps it working. NULLs
+      // are distinct under media_tenant_checksum_idx, so this cannot
+      // collide. The row simply never participates in dedupe.
+      console.warn(JSON.stringify({
+        level: "warn",
+        event: "media.checksum_collision_adopted",
+        mediaId, tenantId, checksum,
+      }));
+      await markReady(null);
+    }
 
     return { width, height, derivatives: derivatives.length };
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const rawMessage = err instanceof Error ? err.message : String(err);
+
+    // Log the raw error for operators; the merchant sees only the curated sentence.
+    console.error(JSON.stringify({
+      level: "error",
+      event: "media.processing_failed",
+      mediaId, tenantId,
+      message: rawMessage,
+    }));
 
     /**
      * Mark the row before rethrowing. A row left `pending` forever is
@@ -205,7 +282,7 @@ async function generateDerivatives(job: ProcessMediaJob): Promise<ProcessMediaRe
           .update(media)
           .set({
             status: "failed",
-            processingError: message.slice(0, MAX_ERROR_LENGTH),
+            processingError: merchantFailureReason(err).slice(0, MAX_ERROR_LENGTH),
             updatedAt: new Date(),
           })
           .where(eq(media.id, mediaId));

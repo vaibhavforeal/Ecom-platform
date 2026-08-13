@@ -32,12 +32,13 @@ export type AllowedImageMimeType = (typeof ALLOWED_IMAGE_MIME_TYPES)[number];
 export const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
 
 /**
- * Ceiling on decoded pixels, for every `sharp()` call in the platform.
- *
- * Bytes on disk say nothing about memory on decode: a 4 KB PNG can
- * declare 10^8 pixels and expand to gigabytes. Both the upload route and
- * the worker decode merchant-supplied bytes, so both need this, and one
- * constant is how they cannot drift apart.
+ * Pixel ceiling for the WORKER's sharp() calls (decode + derivative
+ * encode). The console's request path deliberately enforces its own
+ * lower ceiling — MAX_UPLOAD_PIXELS = 30M in apps/console/src/lib/
+ * image.ts — so an image between the two limits is refused at upload
+ * rather than tying up a request worker. If you change either value,
+ * keep MAX_UPLOAD_PIXELS < MAX_IMAGE_PIXELS: the console integration
+ * suite pins both values and their ordering.
  */
 export const MAX_IMAGE_PIXELS = 50_000_000;
 
