@@ -51,6 +51,16 @@ branch. One line each, naming the fixing commit:
 - **`packages/integrations` has no vitest config** — `b5bedca`: config added with
   `unstubEnvs: true`; stubs no longer leak across files.
 
+## Fixed after the hardening wave
+
+- **`tenants.search_indexing` now has a writer** (2026-08-14, branch
+  `phase1/settings-ui`) — the console `/settings` page (`PUT /api/settings`),
+  gated on `settings:write`, audited as `settings.search_indexing_changed`, with
+  the Redis host cache invalidated on change. Verified live: robots.txt flipped
+  from `Allow: /` to `Disallow: /` immediately on save (no 300s wait), proving
+  Redis invalidation works, then restored to `Allow: /` immediately on flip back
+  to `auto`.
+
 ## Deferred polish from the hardening wave
 
 Triaged by the wave's final whole-branch review as safe to defer — none blocks
@@ -80,9 +90,6 @@ anything, all are small:
 
 - **A purge reaches one storefront process.** Multiple replicas need load-balancer
   fan-out. Not a defect; the endpoint is correct for a single process.
-- **`tenants.search_indexing` has no writer.** Task 1 built the column, the
-  three-mode resolver and the truth-table tests, but nothing in the repo sets it —
-  no route, no console screen. It is SQL-only until a UI exists.
 - **Per-variant stock is unbuildable.** No quantity column and no
   `stock_movements`; the inventory ledger is Phase 2.
 - **No CSP, CSRF rests on `SameSite=Lax`, no rate limit on catalog writes or
