@@ -27,10 +27,8 @@
 		# secret (INTERNAL_API_SECRET) must not touch TLS and vice versa.
 		ask http://console:3001/api/internal/verify-domain?secret={$TLS_ASK_SECRET}
 
-		# Second layer: even authorised issuance is throttled, so a
-		# compromised or buggy ask endpoint cannot cause a stampede.
-		interval 2m
-		burst 5
+		# Modern Caddy rate-limits on-demand issuance internally; the removed
+		# knobs no longer exist. The ask endpoint remains the security gate.
 	}
 
 	servers {
