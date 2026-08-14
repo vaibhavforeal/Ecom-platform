@@ -72,6 +72,7 @@ export function getStorage(): StorageAdapter {
       accessKeyId,
       secretAccessKey,
       publicUrlBase,
+      forcePathStyle: process.env.STORAGE_FORCE_PATH_STYLE === "true",
     });
   } else {
     throw new Error(`Unknown STORAGE_DRIVER: "${driver}". Must be "local" or "s3".`);

@@ -1,0 +1,194 @@
+name: platform-prod
+
+# Production-shaped stack, run locally for the dry run and copied to a
+# VPS later. Differences from that future VPS run are confined to env
+# values and the Caddy image/config (see docs/DEPLOYMENT.md).
+#
+# Only Caddy publishes ports. Everything else — including Postgres —
+# is reachable solely on the compose network; DB access from outside
+# goes through `docker compose exec postgres psql` or one-shot app
+# containers.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: platform
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      APP_DB_USER: app_user
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD}
+      MIGRATOR_DB_USER: app_migrator
+      MIGRATOR_DB_PASSWORD: ${MIGRATOR_DB_PASSWORD}
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
+    volumes:
+      - pgdata_prod:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d platform"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    command:
+      - postgres
+      - -c
+      - max_connections=200
+
+  pgbouncer:
+    image: edoburu/pgbouncer:latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
+      - ./pgbouncer/userlist.prod.txt:/etc/pgbouncer/userlist.txt:ro
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 6432 || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+    volumes:
+      - redisdata_prod:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    command: ["server", "/data"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # One-shot: bucket + anonymous read policy (derivatives are public
+  # objects behind the CDN in production; MinIO mirrors that).
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD" &&
+        (mc mb --ignore-existing local/media) &&
+        mc anonymous set download local/media
+    restart: "no"
+
+  # One-shot: Drizzle migrations + RLS re-apply, as app_migrator,
+  # DIRECT to postgres (never PgBouncer).
+  migrate:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: platform-app:local
+    env_file:
+      - ../env/production.env
+    command: ["pnpm", "--filter", "@platform/db", "migrate"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  storefront:
+    image: platform-app:local
+    env_file:
+      - ../env/production.env
+    command: ["pnpm", "--filter", "@platform/storefront", "start"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      pgbouncer:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/robots.txt',{headers:{Host:'health.localhost'}}).then(()=>process.exit(0),()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  console:
+    image: platform-app:local
+    env_file:
+      - ../env/production.env
+    command: ["pnpm", "--filter", "@platform/console", "start"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      pgbouncer:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/login').then(()=>process.exit(0),()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  worker:
+    image: platform-app:local
+    env_file:
+      - ../env/production.env
+    command: ["pnpm", "--filter", "@platform/worker", "start"]
+    # The worker drains in-flight jobs on SIGTERM; give it room.
+    stop_grace_period: 30s
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      pgbouncer:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      # {$TLS_ASK_SECRET} in the Caddyfile substitutes EMPTY if this
+      # is missing from Caddy's own environment — every ask then 403s.
+      TLS_ASK_SECRET: ${TLS_ASK_SECRET}
+    volumes:
+      - ../caddy/Caddyfile.local:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      storefront:
+        condition: service_healthy
+      console:
+        condition: service_healthy
+
+volumes:
+  pgdata_prod:
+  redisdata_prod:
+  miniodata:
+  caddy_data:
+  caddy_config:
