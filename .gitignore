@@ -33,3 +33,7 @@ infra/caddy/config/
 
 # SDD workspace — git-ignored scratch for subagent-driven development.
 .superpowers/
+
+infra/env/production.env
+infra/docker/pgbouncer/userlist.prod.txt
+infra/caddy/root.crt
