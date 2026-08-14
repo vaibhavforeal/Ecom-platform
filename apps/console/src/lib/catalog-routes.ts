@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { assertCan } from "@platform/core";
+import type { Permission } from "@platform/core";
 import type { WriteContext } from "@platform/core/catalog/server";
 import type { z } from "zod";
 
@@ -58,18 +59,21 @@ export function rejectMalformedId(id: string): NextResponse | null {
  * would let any authenticated merchant write into another merchant's
  * catalog, and because the tables are RLS-protected the mistake would
  * show up as "no data" rather than as an error.
+ *
+ * Despite the name, the pipeline is not catalog-specific: `opts.permission`
+ * lets a non-catalog route (settings) reuse it with its own gate.
  */
 export async function handleCatalogWrite<TSchema extends z.ZodTypeAny, TOutput>(
   req: Request,
   schema: TSchema,
   run: CatalogWriteHandler<z.infer<TSchema>, TOutput>,
-  opts: { successStatus?: number } = {},
+  opts: { successStatus?: number; permission?: Permission } = {},
 ): Promise<NextResponse> {
   const requestId = newRequestId();
 
   try {
     const actor = await getActorOrThrow();
-    assertCan(actor, "catalog:write");
+    assertCan(actor, opts.permission ?? "catalog:write");
 
     const raw = await readBoundedBody(req.body, MAX_JSON_BODY_BYTES);
     if (raw === "too_large") {
