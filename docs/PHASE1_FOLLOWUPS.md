@@ -53,13 +53,13 @@ branch. One line each, naming the fixing commit:
 
 ## Fixed after the hardening wave
 
-- **`tenants.search_indexing` now has a writer** (2026-08-14, branch
-  `phase1/settings-ui`) — the console `/settings` page (`PUT /api/settings`),
-  gated on `settings:write`, audited as `settings.search_indexing_changed`, with
-  the Redis host cache invalidated on change. Verified live: robots.txt flipped
-  from `Allow: /` to `Disallow: /` immediately on save (no 300s wait), proving
-  Redis invalidation works, then restored to `Allow: /` immediately on flip back
-  to `auto`.
+- **`tenants.search_indexing` now has a writer** (`57948b6` permission parameter,
+  `b37903e` domain write + route + tests, `87a36e4` settings page + form + chip) —
+  the console `/settings` page (`PUT /api/settings`), gated on `settings:write`,
+  audited as `settings.search_indexing_changed`, with the Redis host cache
+  invalidated on change. Verified live: robots.txt flipped from `Allow: /` to
+  `Disallow: /` immediately on save (no 300s wait), proving Redis invalidation
+  works, then restored to `Allow: /` immediately on flip back to `auto`.
 
 ## Deferred polish from the hardening wave
 
