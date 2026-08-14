@@ -12,7 +12,7 @@ One shared app image (Dockerfile at the repo root) running storefront, console, 
 bash infra/scripts/gen-env.sh
 ```
 
-Writes `infra/env/production.env` (mode 0600, git-ignored) and `infra/pgbouncer/userlist.txt`. Refuses to overwrite existing files. See **Secrets model** section below for regeneration behavior.
+Writes `infra/env/production.env` (mode 0600, git-ignored) and `infra/docker/pgbouncer/userlist.prod.txt`. Refuses to overwrite existing files. See **Secrets model** section below for regeneration behavior.
 
 ### 2. Start the stack
 
@@ -37,7 +37,7 @@ docker compose --env-file infra/env/production.env -f infra/docker/docker-compos
 Expected output:
 ```
 NAME                         STATUS
-platform-prod-caddy-1        Up (healthy)
+platform-prod-caddy-1        Up
 platform-prod-console-1      Up (healthy)
 platform-prod-storefront-1   Up (healthy)
 platform-prod-worker-1       Up
@@ -56,7 +56,7 @@ Init containers (`migrate`, `minio-init`) must exit 0.
 **Seed demo tenants:**
 
 ```bash
-docker compose --env-file infra/env/production.env -f infra/docker/docker-compose.prod.yml exec -T storefront node_modules/.bin/tsx packages/db/scripts/seed.ts
+docker compose --env-file infra/env/production.env -f infra/docker/docker-compose.prod.yml run --rm migrate pnpm --filter @platform/db seed
 ```
 
 Expected output:
@@ -72,20 +72,31 @@ Expected output:
 
 **Create staff user and session:**
 
+First generate a random session token:
+
 ```bash
-docker compose --env-file infra/env/production.env -f infra/docker/docker-compose.prod.yml exec -T postgres psql -U postgres -d platform <<'EOF'
-INSERT INTO users (id, phone, permissions, created_at, updated_at)
-VALUES ('01a000a3-9993-7dc7-82c2-71ef9d77bec1', '+910000000000', '["staff"]', NOW(), NOW());
+TOKEN=$(openssl rand -hex 32)
+echo "$TOKEN" > /tmp/console-session-token
+```
 
-INSERT INTO sessions (id, user_id, expires_at, created_at)
-VALUES ('8e8092e7060aafa0a9ce13e6e733cbdd317d7159bcbdf122bb8b28235e66c837',
-        '01a000a3-9993-7dc7-82c2-71ef9d77bec1',
-        NOW() + INTERVAL '90 days',
-        NOW());
+Then insert the user, tenant membership, and session:
 
-INSERT INTO audit_log (tenant_id, user_id, event, ip_address, timestamp)
-VALUES (NULL, '01a000a3-9993-7dc7-82c2-71ef9d77bec1', 'session.created', '127.0.0.1', NOW());
-EOF
+```bash
+docker compose --env-file infra/env/production.env -f infra/docker/docker-compose.prod.yml exec -T postgres psql -U postgres -d platform <<SQL
+INSERT INTO users (phone_e164, name)
+VALUES ('+919876543210', 'Dry Run Owner');
+
+INSERT INTO tenant_members (tenant_id, user_id, role, accepted_at)
+SELECT t.id, u.id, 'owner', now()
+FROM tenants t, users u
+WHERE t.slug = 'acme' AND u.phone_e164 = '+919876543210';
+
+INSERT INTO sessions (id, token_hash, user_id, tenant_id, expires_at, idle_expires_at)
+SELECT gen_random_uuid(), encode(sha256('\$TOKEN'::bytea), 'hex'), u.id, t.id,
+       now() + interval '1 day', now() + interval '1 day'
+FROM tenants t, users u
+WHERE t.slug = 'acme' AND u.phone_e164 = '+919876543210';
+SQL
 ```
 
 Expected: `INSERT 0 1` three times.
@@ -93,7 +104,7 @@ Expected: `INSERT 0 1` three times.
 **Verify hostnames are port-less:**
 
 ```bash
-docker compose --env-file infra/env/production.env -f infra/docker/docker-compose.prod.yml exec -T postgres psql -U postgres -d platform -c "SELECT hostname FROM tenants;"
+docker compose --env-file infra/env/production.env -f infra/docker/docker-compose.prod.yml exec -T postgres psql -U postgres -d platform -c "SELECT hostname FROM domains;"
 ```
 
 Expected output:
@@ -107,7 +118,7 @@ Expected output:
 **Save session token for verification commands:**
 
 ```bash
-TOKEN="8e8092e7060aafa0a9ce13e6e733cbdd317d7159bcbdf122bb8b28235e66c837"
+TOKEN=$(cat /tmp/console-session-token)
 ```
 
 ### 4. Export Caddy root CA
@@ -383,7 +394,7 @@ Updated Premium Shirt
 docker compose --env-file infra/env/production.env -f infra/docker/docker-compose.prod.yml ps
 ```
 
-All application services should show `Up (healthy)`.
+Expected: postgres, pgbouncer, redis, minio, console, and storefront show `Up (healthy)`; caddy and worker show `Up`; migrate and minio-init show `Exited (0)`.
 
 ## Secrets model
 
@@ -454,4 +465,4 @@ docker compose --env-file infra/env/production.env -f infra/docker/docker-compos
 docker compose --env-file infra/env/production.env -f infra/docker/docker-compose.prod.yml down -v
 ```
 
-Volumes destroyed: `postgres-data`, `minio-data`, `caddy-data` (includes local CA certificate).
+Volumes destroyed: `pgdata_prod` (database), `redisdata_prod`, `miniodata` (media), `caddy_data` (includes local CA certificate), `caddy_config`.

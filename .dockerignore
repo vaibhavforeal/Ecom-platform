@@ -20,9 +20,14 @@ tasks
 .superpowers
 .remember
 .firecrawl
+.claude
 infra/caddy/data
 infra/caddy/config
+infra/caddy/root.crt
 infra/docker/data
+infra/docker/pgbouncer/userlist.prod*
 infra/env
 apps/*/tests
 packages/*/tests
+*.txt
+*.md
