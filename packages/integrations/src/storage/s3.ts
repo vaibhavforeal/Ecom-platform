@@ -23,12 +23,20 @@ export type S3Config = {
   secretAccessKey: string;
   /** Public URL base for this bucket, if CDN-fronted. */
   publicUrlBase?: string;
+  /**
+   * Path-style addressing (endpoint.com/bucket/key instead of
+   * bucket.endpoint.com/key). Required for MinIO and most self-hosted
+   * S3; harmless for R2. The SDK default (virtual-hosted) stays for
+   * anything that does not opt in.
+   */
+  forcePathStyle?: boolean;
 };
 
 export function createS3Driver(config: S3Config): StorageAdapter {
   const client = new S3Client({
     endpoint: config.endpoint,
     region: config.region,
+    forcePathStyle: config.forcePathStyle ?? false,
     credentials: {
       accessKeyId: config.accessKeyId,
       secretAccessKey: config.secretAccessKey,
