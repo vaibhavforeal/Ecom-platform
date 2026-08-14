@@ -22,10 +22,17 @@ Scope decisions made by the owner at session start:
   runs tsx), so every process needs source + full deps anyway, and one
   Dockerfile is one thing to debug on first containerization. Slimming is
   a named follow-up, not a requirement.
-- **Zero application-code changes.** Verification uses a SQL-seeded
-  session + curl for console writes (the settings live pass already did
-  exactly this). The OTP provider (throws in production; MSG91 is a
-  Phase 4 stub) is explicitly NOT solved here.
+- **Zero application-code changes, with one amendment found during
+  planning:** the S3 storage driver constructs its `S3Client` without
+  `forcePathStyle`, so any custom endpoint (MinIO here, and equally R2 or
+  self-hosted S3 later) gets virtual-hosted addressing —
+  `bucket.minio:9000`, which resolves nowhere. The plan adds one
+  env-gated option (`STORAGE_FORCE_PATH_STYLE=true` →
+  `forcePathStyle: true`, default unchanged) in
+  `packages/integrations/src/storage/`. Everything else stays code-free:
+  verification uses a SQL-seeded session + curl for console writes (the
+  settings live pass already did exactly this). The OTP provider (throws
+  in production; MSG91 is a Phase 4 stub) is explicitly NOT solved here.
 
 ---
 
