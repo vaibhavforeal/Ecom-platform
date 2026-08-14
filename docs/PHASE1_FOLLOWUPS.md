@@ -86,6 +86,26 @@ anything, all are small:
   remain from pre-cleanup runs (origin of `rc-` unidentified; users are
   referenced by audit history). Harmless; sweep only with a SELECT first.
 
+## Deferred polish from the settings-UI branch
+
+Triaged by that branch's final whole-branch review as polish-grade — no
+behavioural impact today:
+
+- `updateSearchIndexing`'s no-op SELECT takes no row lock, so two concurrent
+  writes can both record the same stale `before` in their audit rows. One
+  owner-facing radio button makes this near-impossible to hit; add
+  `.for("update")` (or `UPDATE … RETURNING` the old value) when a second
+  setting joins the page and concurrent writes get likelier.
+- `handleCatalogWrite`'s 413 message still says "Catalog payloads must be…"
+  even on a settings write. Genericize the copy when next in
+  `apps/console/src/lib/catalog-routes.ts`; consider renaming the handler
+  (`handleConsoleWrite`) in the same pass.
+- `updateSearchIndexing` doesn't filter `deleted_at` — unreachable via the
+  route (session resolution already excludes deleted tenants), but the
+  function guards future non-HTTP callers elsewhere (it re-validates the
+  enum), so add `isNull(tenants.deletedAt)` to the WHERE for the same reason
+  when next in the file.
+
 ## Known limitations, by design
 
 - **A purge reaches one storefront process.** Multiple replicas need load-balancer
