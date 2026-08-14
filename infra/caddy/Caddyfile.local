@@ -1,0 +1,67 @@
+# Local dry run. Same shape as the production Caddyfile with two
+# differences: certificates come from Caddy's internal CA
+# (local_certs), and the hostnames are *.localhost. The on-demand-TLS
+# ask gate is IDENTICAL to production on purpose — issuance for
+# acme.localhost genuinely round-trips through the console's
+# verify-domain endpoint with TLS_ASK_SECRET, and an unverified
+# hostname is genuinely refused a certificate.
+#
+# No HSTS here: a Strict-Transport-Security header on *.localhost
+# would poison the developer's browser for every local project.
+
+{
+	local_certs
+
+	on_demand_tls {
+		ask http://console:3001/api/internal/verify-domain?secret={$TLS_ASK_SECRET}
+	}
+
+	servers {
+		trusted_proxies static private_ranges
+	}
+}
+
+# ── Merchant console ────────────────────────────────────────────
+console.localhost {
+	reverse_proxy console:3001 {
+		header_up X-Forwarded-Host {host}
+		header_up X-Real-IP {remote_host}
+	}
+
+	header {
+		X-Frame-Options "DENY"
+		X-Content-Type-Options "nosniff"
+		-Server
+	}
+}
+
+# ── Internal endpoints must never be publicly reachable ─────────
+console.localhost/api/internal/* {
+	respond 404
+}
+
+# ── Product media (MinIO stands in for R2) ──────────────────────
+# MEDIA_PUBLIC_BASE_URL=https://media.localhost, and media rows store
+# bare object keys, so the public URL is /<key>. MinIO serves objects
+# at /<bucket>/<key>; the rewrite inserts the bucket.
+media.localhost {
+	rewrite * /media{uri}
+	reverse_proxy minio:9000
+}
+
+# ── Storefronts (on-demand TLS, the production path) ────────────
+:443 {
+	tls {
+		on_demand
+	}
+
+	reverse_proxy storefront:3000 {
+		header_up X-Forwarded-Host {host}
+		header_up X-Real-IP {remote_host}
+	}
+
+	header {
+		X-Content-Type-Options "nosniff"
+		-Server
+	}
+}
