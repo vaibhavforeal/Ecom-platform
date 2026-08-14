@@ -35,14 +35,23 @@ export default async function DashboardPage() {
         Signed in as {actor.name ?? actor.phoneE164} · {actor.role}
       </p>
 
-      {can(actor, "catalog:read") && (
+      {(can(actor, "catalog:read") || can(actor, "settings:read")) && (
         <nav className="toolbar">
-          <Link href="/products" className="chip">
-            Products
-          </Link>
-          <Link href="/products/taxonomy" className="chip">
-            Categories &amp; collections
-          </Link>
+          {can(actor, "catalog:read") && (
+            <>
+              <Link href="/products" className="chip">
+                Products
+              </Link>
+              <Link href="/products/taxonomy" className="chip">
+                Categories &amp; collections
+              </Link>
+            </>
+          )}
+          {can(actor, "settings:read") && (
+            <Link href="/settings" className="chip">
+              Settings
+            </Link>
+          )}
         </nav>
       )}
 

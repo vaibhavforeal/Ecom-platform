@@ -51,6 +51,16 @@ branch. One line each, naming the fixing commit:
 - **`packages/integrations` has no vitest config** — `b5bedca`: config added with
   `unstubEnvs: true`; stubs no longer leak across files.
 
+## Fixed after the hardening wave
+
+- **`tenants.search_indexing` now has a writer** (`57948b6` permission parameter,
+  `b37903e` domain write + route + tests, `87a36e4` settings page + form + chip) —
+  the console `/settings` page (`PUT /api/settings`), gated on `settings:write`,
+  audited as `settings.search_indexing_changed`, with the Redis host cache
+  invalidated on change. Verified live: robots.txt flipped from `Allow: /` to
+  `Disallow: /` immediately on save (no 300s wait), proving Redis invalidation
+  works, then restored to `Allow: /` immediately on flip back to `auto`.
+
 ## Deferred polish from the hardening wave
 
 Triaged by the wave's final whole-branch review as safe to defer — none blocks
@@ -76,13 +86,30 @@ anything, all are small:
   remain from pre-cleanup runs (origin of `rc-` unidentified; users are
   referenced by audit history). Harmless; sweep only with a SELECT first.
 
+## Deferred polish from the settings-UI branch
+
+Triaged by that branch's final whole-branch review as polish-grade — no
+behavioural impact today:
+
+- `updateSearchIndexing`'s no-op SELECT takes no row lock, so two concurrent
+  writes can both record the same stale `before` in their audit rows. One
+  owner-facing radio button makes this near-impossible to hit; add
+  `.for("update")` (or `UPDATE … RETURNING` the old value) when a second
+  setting joins the page and concurrent writes get likelier.
+- `handleCatalogWrite`'s 413 message still says "Catalog payloads must be…"
+  even on a settings write. Genericize the copy when next in
+  `apps/console/src/lib/catalog-routes.ts`; consider renaming the handler
+  (`handleConsoleWrite`) in the same pass.
+- `updateSearchIndexing` doesn't filter `deleted_at` — unreachable via the
+  route (session resolution already excludes deleted tenants), but the
+  function guards future non-HTTP callers elsewhere (it re-validates the
+  enum), so add `isNull(tenants.deletedAt)` to the WHERE for the same reason
+  when next in the file.
+
 ## Known limitations, by design
 
 - **A purge reaches one storefront process.** Multiple replicas need load-balancer
   fan-out. Not a defect; the endpoint is correct for a single process.
-- **`tenants.search_indexing` has no writer.** Task 1 built the column, the
-  three-mode resolver and the truth-table tests, but nothing in the repo sets it —
-  no route, no console screen. It is SQL-only until a UI exists.
 - **Per-variant stock is unbuildable.** No quantity column and no
   `stock_movements`; the inventory ledger is Phase 2.
 - **No CSP, CSRF rests on `SameSite=Lax`, no rate limit on catalog writes or

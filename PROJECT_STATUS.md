@@ -1,6 +1,6 @@
 # Project Status
 
-**Last updated:** 2026-08-13
+**Last updated:** 2026-08-14
 
 Working notes for picking this up after a break. Architecture lives in
 [`PLATFORM_BLUEPRINT.md`](./PLATFORM_BLUEPRINT.md); day-to-day commands live in
@@ -20,7 +20,7 @@ Working notes for picking this up after a break. Architecture lives in
 
 | Piece | State |
 | :--- | :--- |
-| Per-tenant search indexing | ⚠️ `tenants.search_indexing` (`auto`/`indexed`/`noindex`) + `isSearchIndexable`, read by `robots.txt` and page metadata. **No route and no console screen writes the column** — it is SQL-only until a settings UI exists |
+| Per-tenant search indexing | ✅ `tenants.search_indexing` (`auto`/`indexed`/`noindex`) + `isSearchIndexable`, read by `robots.txt` and page metadata, **written by the console's `/settings` page** (`PUT /api/settings`, `settings:write`, audited, Redis host-cache invalidated on change) |
 | Catalog schema + RLS + seed | ✅ 11 tables, policies auto-derived, demo catalog for both tenants |
 | Catalog domain logic (`@platform/core/catalog`) | ✅ slugs, option matrices, money, search, category trees |
 | Storefront query layer | ✅ listing, PDP, slug resolution, sitemap — integration tested |
@@ -67,17 +67,18 @@ staff session and the seeded `acme` tenant:
   restarted** — see the cache-purge item under Open items. That is a gap, not a
   bug in the write path.
 
-**Not an open question — a missing screen.** A `trial` tenant defaults to
-`noindex` in both `robots.txt` and page metadata, and Task 1 already built the
-way out: `tenants.search_indexing` is `auto` | `indexed` | `noindex`, and
-`isSearchIndexable` reads it, so a trial merchant launching a real store can be
-indexed by setting the column to `indexed`. `suspended` and `churned` stay
-`noindex` whatever the column says — that ordering is deliberate and tested.
+**Search-indexing settings screen.** A `trial` tenant defaults to `noindex` in
+both `robots.txt` and page metadata, and `tenants.search_indexing` is `auto` |
+`indexed` | `noindex`. `isSearchIndexable` reads it, so a trial merchant
+launching a real store can be indexed by setting the column to `indexed`.
+`suspended` and `churned` stay `noindex` whatever the column says — that
+ordering is deliberate and tested.
 
-What is missing is the way to set it: **nothing in the repo writes that
-column.** No route, no console screen, no seed value other than the `auto`
-default. So the setting exists and works, but is reachable only by SQL until a
-tenant-settings UI exists.
+The console's `/settings` page (launched 2026-08-14) now provides the writer:
+`PUT /api/settings` takes `{ searchIndexing: "auto" | "indexed" | "noindex" }`,
+gates on `settings:write`, audits as `settings.search_indexing_changed`, and
+invalidates the Redis host cache immediately so the change propagates to
+`robots.txt` with no TTL wait.
 
 ### Last full verification (2026-07-31, all green)
 
@@ -243,6 +244,26 @@ only through Corepack. Either `corepack pnpm …`, or install shims once with
 `corepack enable --install-directory <dir> pnpm` and put that dir on PATH. Nested
 package scripts (`pnpm --filter …`) need the shim on PATH — `corepack pnpm` alone
 fails on the inner call.
+
+### Re-verified 2026-08-14 (search-indexing settings, full, all green)
+
+```
+pnpm lint                clean
+pnpm typecheck           6/6 packages
+pnpm build               2/2 Next apps      (Next 16.3.0, Turbopack)
+pnpm test                325 unit tests     (core 279, integrations 46)
+pnpm test:integration    191 tests          (console 107, core 25, db 32, storefront 16, worker 11)
+```
+
+Unit counts unchanged from hardening wave. Integration **185 → 191**: console
+**101 → 107** (+6 from new `settings.integration.test.ts` covering auth, authz,
+validation, audit trail, and the `changed` flag). All other packages unchanged.
+
+Live pass on production builds (storefront 3010, console 3001): robots.txt
+flipped from `Allow: /` to `Disallow: /` **immediately** on save (no 300s wait),
+proving Redis invalidation works, then restored to `Allow: /` immediately on
+flip back to `auto`. Homepage meta robots showed `noindex, nofollow` in noindex
+mode. Feature works end-to-end as specified.
 
 ---
 
