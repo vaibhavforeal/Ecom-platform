@@ -265,6 +265,46 @@ proving Redis invalidation works, then restored to `Allow: /` immediately on
 flip back to `auto`. Homepage meta robots showed `noindex, nofollow` in noindex
 mode. Feature works end-to-end as specified.
 
+### Verified 2026-08-14 (containerized dry run, full stack)
+
+Brought up the full production-shaped stack (`infra/docker/docker-compose.prod.yml`) on
+ports 80/443 with on-demand TLS, verified end-to-end through seven live checks:
+
+**Services up:** All containers healthy on first attempt (postgres, redis, pgbouncer,
+minio, caddy, console, storefront, worker). Init containers (migrate, minio-init)
+exited 0. Zero manifest corrections required.
+
+**TLS issuance (both directions):**
+- **Verified hostname** (`acme.localhost`): Certificate issued on-demand, storefront
+  content served. Caddy logs: `certificate obtained successfully`.
+- **Unverified hostname** (`unknown.localhost`): TLS handshake failed (exit 35),
+  no HTTP response. Console logs: `tls.issuance_refused`. The verify-domain endpoint
+  correctly gated issuance.
+
+**Robots.txt flip (Redis invalidation):** `PUT /api/settings` with
+`searchIndexing=noindex` → robots.txt changed from `Allow: /` to `Disallow: /`
+**immediately** (no 300s wait). Flip back to `auto` also immediate. Proves
+cross-container cache invalidation (console → storefront via Redis PUBLISH).
+
+**Internal endpoint blackhole:** Public request to
+`console.localhost/api/internal/verify-domain` → 404. Caddy's internal ask
+(`http://console:3001/api/internal/verify-domain?secret={$TLS_ASK_SECRET}`) still
+works (proven by refusal logs above). Security-critical pair verified.
+
+**Media pipeline:** 1×1 PNG uploaded via console → worker processed (3 derivatives:
+AVIF/WebP/JPEG) → status `ready` in database → first derivative publicly served via
+`media.localhost` (200). Complete S3-compatible chain verified (MinIO storage).
+
+**Catalog purge:** Product title changed via console API → new title appeared on
+storefront homepage **immediately**. No TTL wait. Proves cross-container purge
+(console → storefront via internal HTTP).
+
+**Observed outputs:** All verification commands and their exact outputs documented
+in `docs/DEPLOYMENT.md` (the runbook).
+
+Stack left running for spot-checks, then torn down per Task 6 (`docker compose down`,
+volumes preserved). Dev infrastructure (ports 5442/6442/6389) untouched throughout.
+
 ---
 
 ## First thing to do after restart
@@ -566,6 +606,7 @@ If the database volume survived, the two demo tenants are still seeded. If not:
 | TRAI DLT registration (SMS) | Carriers silently drop unregistered traffic; blocks Phase 4 | Weeks |
 | WhatsApp Business verification | Blocks Phase 4 messaging | Weeks |
 | Ekart partner agreement | API docs and credentials are gated behind a Flipkart commercial agreement | Unknown |
+| Run this on a real VPS | Local dry run verified (see `docs/DEPLOYMENT.md` for the runbook). What remains: domain + TLS (Let's Encrypt via Cloudflare DNS), R2/S3 storage (replace MinIO), OTP provider (Phase 4 blocker), backups, external monitoring | VPS setup + domain + R2 configuration |
 | ~~Storefront cache purge — blocked on a Next defect~~ | **Closed by Task 8**: both apps are on Next 16.3.0, where the tag manifest is written unconditionally. Verified live — three consecutive console writes on the same tenant each appeared on the storefront within a second, with the 300s TTL never waited on. The remaining limitation is unchanged and is a deployment fact, not a bug: one purge reaches ONE storefront process, so more than one replica needs a load balancer that fans the purge out, or a shared cache handler | Done |
 | Stock levels | The console can set a variant's SKU, price and low-stock threshold but not its quantity — there is no `stock_movements` table yet. The inventory ledger is Phase 2 (blueprint §4.5), and a mutable counter would be the wrong thing to add early | Phase 2 |
 
