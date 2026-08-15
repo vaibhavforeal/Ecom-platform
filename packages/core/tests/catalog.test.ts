@@ -28,6 +28,8 @@ import type { CategoryNode, OptionAxis } from "../src/catalog/index";
 // pure, but that barrel also pulls in the query layer and therefore the
 // postgres driver, which has no business in the unit suite.
 import { normalizeSearchQuery, toPrefixTsQuery } from "../src/catalog/search";
+// Exception: bulk.ts pulls the postgres driver at runtime (via its module graph),
+// but mergeVariant is pure and makes no connection — harmless for unit tests.
 import { mergeVariant } from "../src/catalog/bulk";
 import type { CsvVariantDraft } from "../src/catalog/csv";
 import type { ConsoleVariant } from "../src/catalog/server";

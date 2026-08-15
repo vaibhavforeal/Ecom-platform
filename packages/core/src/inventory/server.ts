@@ -218,7 +218,19 @@ export async function recordMovement(
       // the concurrent one.
       if (input.idempotencyKey) {
         const existing = await findByIdempotencyKey(tx, ctx.tenantId, input.idempotencyKey);
-        if (existing) return { ...existing, replayed: true };
+        if (existing) {
+          // Idempotency fingerprint: the key must match the full request, not
+          // just exist. Reusing a key with different parameters is a client bug.
+          if (existing.variantId !== input.variantId || existing.delta !== input.delta) {
+            throw new AppError({
+              code: "idempotency_key_reuse",
+              message: `Idempotency key "${input.idempotencyKey}" was already used for a different adjustment`,
+              status: 422,
+              publicMessage: "This idempotency key was already used for a different adjustment.",
+            });
+          }
+          return { ...existing, replayed: true };
+        }
       }
 
       const location = await ensureDefaultLocation(tx, ctx.tenantId);
@@ -262,7 +274,7 @@ export async function recordMovement(
         const [level] = await tx
           .update(stockLevels)
           .set({
-            onHand: sql.raw(`on_hand + ${input.delta}`),
+            onHand: sql`${stockLevels.onHand} + ${input.delta}`,
             updatedAt: new Date(),
           })
           .where(
@@ -273,6 +285,9 @@ export async function recordMovement(
             ),
           )
           .returning({ onHand: stockLevels.onHand });
+        // Phase 1 assumption: one location per variant, so if a prior movement
+        // exists, the projection row exists. Phase 5 (multi-location) must revisit:
+        // the reason check is per-variant, the projection key per-(variant,location).
         onHand = level!.onHand;
       }
 
@@ -322,7 +337,18 @@ export async function recordMovement(
       const replay = await withTenant(ctx.tenantId, (tx) =>
         findByIdempotencyKey(tx, ctx.tenantId, input.idempotencyKey!),
       );
-      if (replay) return { ...replay, replayed: true };
+      if (replay) {
+        // Idempotency fingerprint: verify the replay matches the request.
+        if (replay.variantId !== input.variantId || replay.delta !== input.delta) {
+          throw new AppError({
+            code: "idempotency_key_reuse",
+            message: `Idempotency key "${input.idempotencyKey}" was already used for a different adjustment`,
+            status: 422,
+            publicMessage: "This idempotency key was already used for a different adjustment.",
+          });
+        }
+        return { ...replay, replayed: true };
+      }
     }
 
     // Two concurrent first movements: both INSERT the projection row,

@@ -186,6 +186,79 @@ describe("recordMovement", () => {
     expect(await movementCount(trackedVariant)).toBe(before + 1);
   });
 
+  it("rejects idempotency key reuse with different delta", async () => {
+    const key = "idem-diff-delta-" + randomUUID();
+    await recordMovement(ctx(tenantA), {
+      variantId: trackedVariant,
+      delta: 5,
+      note: "first",
+      idempotencyKey: key,
+    });
+
+    await expect(
+      recordMovement(ctx(tenantA), {
+        variantId: trackedVariant,
+        delta: 10,
+        note: "second attempt, different delta",
+        idempotencyKey: key,
+      }),
+    ).rejects.toMatchObject({
+      code: "idempotency_key_reuse",
+      status: 422,
+      publicMessage: "This idempotency key was already used for a different adjustment.",
+    });
+  });
+
+  it("rejects idempotency key reuse with different variant", async () => {
+    const key = "idem-diff-variant-" + randomUUID();
+    const secondVariant = await makeVariant(tenantA, true);
+
+    await recordMovement(ctx(tenantA), {
+      variantId: trackedVariant,
+      delta: 5,
+      note: "first",
+      idempotencyKey: key,
+    });
+
+    await expect(
+      recordMovement(ctx(tenantA), {
+        variantId: secondVariant,
+        delta: 5,
+        note: "second attempt, different variant",
+        idempotencyKey: key,
+      }),
+    ).rejects.toMatchObject({
+      code: "idempotency_key_reuse",
+      status: 422,
+      publicMessage: "This idempotency key was already used for a different adjustment.",
+    });
+  });
+
+  it("replays exact-match idempotency key including note changes", async () => {
+    const key = "idem-exact-" + randomUUID();
+    const before = await movementCount(trackedVariant);
+
+    const first = await recordMovement(ctx(tenantA), {
+      variantId: trackedVariant,
+      delta: 3,
+      note: "original note",
+      idempotencyKey: key,
+    });
+
+    // Same key, same variantId, same delta — note doesn't matter for fingerprint
+    const second = await recordMovement(ctx(tenantA), {
+      variantId: trackedVariant,
+      delta: 3,
+      note: "different note, but same fingerprint",
+      idempotencyKey: key,
+    });
+
+    expect(second.replayed).toBe(true);
+    expect(second.movementId).toBe(first.movementId);
+    expect(second.delta).toBe(3);
+    expect(await movementCount(trackedVariant)).toBe(before + 1);
+  });
+
   it("two concurrent decrements of the last unit: exactly one succeeds", async () => {
     await recordMovement(ctx(tenantA), { variantId: raceVariant, delta: 1, note: "one unit" });
 
