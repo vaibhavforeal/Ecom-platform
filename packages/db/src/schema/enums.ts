@@ -107,3 +107,13 @@ export type CarrierCode = (typeof CARRIER_CODES)[number];
 
 export const SEARCH_INDEXING_MODES = ["auto", "indexed", "noindex"] as const;
 export type SearchIndexing = (typeof SEARCH_INDEXING_MODES)[number];
+
+/**
+ * Why stock moved. Deliberately minimal: order/RTO/POS reasons arrive as
+ * migrations with their phases, and a new reason being a migration is a
+ * feature — the CHECK constraint is the single source of truth.
+ * `opening_balance` is chosen automatically for a variant's first
+ * movement; everything merchant-initiated after that is `adjustment`.
+ */
+export const STOCK_MOVEMENT_REASONS = ["opening_balance", "adjustment"] as const;
+export type StockMovementReason = (typeof STOCK_MOVEMENT_REASONS)[number];

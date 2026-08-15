@@ -128,6 +128,25 @@ beforeAll(async () => {
 
   productA = await mkProduct(tenantA, "iso-product-A");
   productB = await mkProduct(tenantB, "iso-product-B");
+
+  // Inventory fixtures: without rows on both sides, the read-isolation
+  // loop passes on the three new tables no matter what RLS does.
+  const mkStock = async (tenantId: string, productId: string) => {
+    const [variant] = await admin<{ id: string }[]>`
+      SELECT id FROM product_variants WHERE product_id = ${productId}`;
+    const [loc] = await admin<{ id: string }[]>`
+      INSERT INTO locations (id, tenant_id, name, is_default)
+      VALUES (${randomUUID()}, ${tenantId}, 'Default', true)
+      RETURNING id`;
+    await admin`
+      INSERT INTO stock_movements (id, tenant_id, variant_id, location_id, delta, reason)
+      VALUES (${randomUUID()}, ${tenantId}, ${variant!.id}, ${loc!.id}, 5, 'opening_balance')`;
+    await admin`
+      INSERT INTO stock_levels (tenant_id, variant_id, location_id, on_hand)
+      VALUES (${tenantId}, ${variant!.id}, ${loc!.id}, 5)`;
+  };
+  await mkStock(tenantA, productA);
+  await mkStock(tenantB, productB);
 });
 
 afterAll(async () => {
@@ -227,18 +246,21 @@ describe("schema coverage: no table escapes a deliberate decision", () => {
     expect(r!.rolsuper).toBe(false);
   });
 
-  it("audit_log is append-only for the application role", async () => {
-    const role = process.env.DB_APP_ROLE ?? "app_user";
-    const [r] = await admin<{ upd: boolean; del: boolean; ins: boolean }[]>`
-      SELECT has_table_privilege(${role}, 'audit_log', 'UPDATE') AS upd,
-             has_table_privilege(${role}, 'audit_log', 'DELETE') AS del,
-             has_table_privilege(${role}, 'audit_log', 'INSERT') AS ins`;
+  it.each(["audit_log", "stock_movements"])(
+    "%s is append-only for the application role",
+    async (table) => {
+      const role = process.env.DB_APP_ROLE ?? "app_user";
+      const [r] = await admin<{ upd: boolean; del: boolean; ins: boolean }[]>`
+        SELECT has_table_privilege(${role}, ${table}, 'UPDATE') AS upd,
+               has_table_privilege(${role}, ${table}, 'DELETE') AS del,
+               has_table_privilege(${role}, ${table}, 'INSERT') AS ins`;
 
-    // An audit trail the application can rewrite is not an audit trail.
-    expect(r!.upd).toBe(false);
-    expect(r!.del).toBe(false);
-    expect(r!.ins).toBe(true);
-  });
+      // A history the application can rewrite is not a history.
+      expect(r!.upd).toBe(false);
+      expect(r!.del).toBe(false);
+      expect(r!.ins).toBe(true);
+    },
+  );
 });
 
 // ───────────────────────────────────────────────────────────────

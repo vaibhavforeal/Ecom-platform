@@ -98,9 +98,13 @@ delete, no address fields, no CRUD: Phase 5's concern.
 **`stock_movements`** — append-only:
 
 - `id` uuid PK (uuidv7), `tenant_id` → tenants (cascade),
-  `variant_id` → product_variants (**no cascade** — a hard variant delete
-  must not erase ledger history; variants are soft-deleted in practice),
-  `location_id` → locations (no cascade).
+  `variant_id` uuid NOT NULL and `location_id` uuid NOT NULL — bare uuids,
+  NO foreign keys, the `audit_log.entity_id` precedent: a RESTRICT FK here
+  would make tenant deletion fail mid-cascade (movements must outlive
+  nothing, but Postgres cascade order is unspecified), and a CASCADE FK
+  would let a stray hard variant delete silently erase ledger history.
+  Write-time integrity comes from the visibility SELECT inside
+  `recordMovement`.
 - `delta` integer NOT NULL, `CHECK (delta <> 0)`.
 - `reason` text NOT NULL, CHECK against `STOCK_MOVEMENT_REASONS` in
   `schema/enums.ts` — **`'opening_balance' | 'adjustment'`** only. Order/RTO
