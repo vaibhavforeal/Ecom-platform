@@ -484,6 +484,8 @@ export type InventoryRow = {
   sku: string;
   options: Record<string, string>;
   onHand: number;
+  reserved: number;
+  available: number;
   lowStockAt: number | null;
   isActive: boolean;
 };
@@ -503,6 +505,16 @@ export async function listInventory(
   const offset = Math.max(opts.offset ?? 0, 0);
 
   return withTenant(tenantId, async (tx) => {
+    const activeHolds = tx
+      .select({
+        variantId: stockReservations.variantId,
+        reserved: sql<number>`sum(${stockReservations.quantity})::int`.as("reserved"),
+      })
+      .from(stockReservations)
+      .where(sql`${stockReservations.expiresAt} > now()`)
+      .groupBy(stockReservations.variantId)
+      .as("active_holds");
+
     const onHand = sql<number>`coalesce(sum(${stockLevels.onHand}), 0)::int`;
     // The condition only — .having() supplies the keyword. A null
     // threshold compares against -1, which a non-negative sum never
@@ -519,11 +531,13 @@ export async function listInventory(
         lowStockAt: productVariants.lowStockAt,
         isActive: productVariants.isActive,
         onHand: onHand.as("on_hand"),
+        reserved: sql<number>`coalesce(max(${activeHolds.reserved}), 0)::int`.as("reserved"),
         total: sql<number>`count(*) over ()::int`.as("total"),
       })
       .from(productVariants)
       .innerJoin(products, eq(products.id, productVariants.productId))
       .leftJoin(stockLevels, eq(stockLevels.variantId, productVariants.id))
+      .leftJoin(activeHolds, eq(activeHolds.variantId, productVariants.id))
       .where(
         and(
           eq(productVariants.tenantId, tenantId),
@@ -554,6 +568,8 @@ export async function listInventory(
         sku: r.sku,
         options: (r.options ?? {}) as Record<string, string>,
         onHand: r.onHand,
+        reserved: r.reserved,
+        available: Math.max(r.onHand - r.reserved, 0),
         lowStockAt: r.lowStockAt,
         isActive: r.isActive,
       })),

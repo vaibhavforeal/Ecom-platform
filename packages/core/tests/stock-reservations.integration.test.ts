@@ -14,6 +14,7 @@ import {
   getMovements,
   getStockLevels,
   holdStock,
+  listInventory,
   recordMovement,
   reconcileStockLevels,
   releaseStock,
@@ -421,5 +422,30 @@ describe("consumeStock", () => {
     ).rejects.toMatchObject({ code: "stock_held", status: 422 });
     expect(await saleCount(vGuard)).toBe(0);
     expect(await variantHoldCount(vGuard)).toBe(1); // the other hold survives
+  });
+});
+
+describe("listInventory with holds", () => {
+  it("carries reserved and available per row", async () => {
+    const vList = await makeVariant(tenantA, true);
+    await seed(vList, 4);
+    await holdStock(ctx(), { reference: ref(), lines: [{ variantId: vList, quantity: 1 }] });
+
+    const { items } = await listInventory(tenantA);
+    const row = items.find((i) => i.variantId === vList)!;
+    expect(row.onHand).toBe(4);
+    expect(row.reserved).toBe(1);
+    expect(row.available).toBe(3);
+  });
+
+  it("an expired hold contributes nothing", async () => {
+    const vList2 = await makeVariant(tenantA, true);
+    await seed(vList2, 2);
+    await insertHold(vList2, 1, -60);
+
+    const { items } = await listInventory(tenantA);
+    const row = items.find((i) => i.variantId === vList2)!;
+    expect(row.reserved).toBe(0);
+    expect(row.available).toBe(2);
   });
 });
