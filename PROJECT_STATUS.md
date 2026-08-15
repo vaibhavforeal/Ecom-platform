@@ -400,6 +400,67 @@ output. Force turbo directly.
 
 ---
 
+### Verified 2026-08-16 (commerce core — Phase 2 completion wave, full, all green)
+
+```
+pnpm lint                clean
+pnpm typecheck           6/6 packages
+pnpm build               2/2 Next apps      (Next 16.3.0, Turbopack)
+pnpm test                533 unit tests     (core 478, integrations 46, console 9)
+pnpm test:integration    365 tests          (console 144, core 128, db 33, storefront 40, worker 20)
+```
+
+Built overnight (owner directive) by multi-agent orchestration: design panel
+(3 designs, 3 judges, synthesized spec at `docs/design/PHASE2_COMMERCE_DESIGN.md`
+with a 21-row Decisions table), serial schema spine (migration 0008 — 15
+tenant-scoped tables), five parallel builder lots (tax+invoices, promotions,
+payments, cart/serviceability/customers/storefront, orders+console), a serial
+checkout integrator, then a 6-dimension adversarial review (16 findings raised,
+13 confirmed by 2-refuter majority, all fixed and pinned; 2 refuted; 1 deferred
+— see PHASE2_FOLLOWUPS). Unit **332 → 533**, integration **238 → 365**.
+
+What shipped: guest carts + serviceability (pincode-prefix state cross-check),
+checkout with holds/idempotency/promotions/per-line GST (inclusive extraction,
+D18 sum-invariant split), COD confirming through the same door as webhooks,
+BYOG payments (mock + razorpay drivers, dual sealed credential blobs, raw-body
+HMAC, event-id idempotency), gap-free invoice numbering (UPDATE..RETURNING in
+the confirming tx), order state machine (single `transitionOrder` writer,
+manual fulfilment ladder), print-CSS invoice document, refunds (insert-once,
+claim-first worker), abandoned expiry (delayed job + 10-min sweep), checkout
+rate limiting (5/min per tenant+ip), console orders/customers/promotions/
+payment-settings pages.
+
+Live pass (production storefront on 3010, `acme` configured GST-regular
+Delhi + seeded stock): COD checkout over HTTP → order 1001 confirmed,
+tax exactly hand-computed (₹998 incl. @12% → tax 10,693p, CGST 5,347 +
+SGST 5,346), invoice INV/2026-27/0001 tax_invoice, sale −2 in the ledger,
+stock 5→3, order.placed/confirmed events, customer row with first_order_at;
+guest page 200 with token / 404 without; same idempotency key → same order;
+6th checkout in a minute → 429; prepaid without a gateway → 422
+payments_not_configured with cart reverted and zero stranded holds. Mock
+prepaid ran on a dev-mode server (the mock driver fails closed under
+production NODE_ENV **by design** — the fail-closed gate itself is the
+production observation): payment_required → HMAC-signed payment.captured
+webhook → 200 → order 1003 confirmed paid, inter-state IGST 5,346, invoice
+INV/2026-27/0002 (sequential and gap-free while ORDER numbers legitimately
+gapped — 1002 was consumed by the refusal probe), payment row captured with
+fee economics 1,180/180, webhook evidence row, stock 3→2.
+
+**Live-pass limitations:**
+- **Console UI not driven live** (needs a staff session; the `__Host-` cookie
+  demands HTTPS locally). Console routes are covered by 144 integration tests;
+  a "Live Pass Staff" owner user now exists for `acme` for future console use.
+- **Real gateway not exercised** — the razorpay driver is unit-tested against
+  known HMAC vectors and the BYOG flow is integration-tested via the mock;
+  the literal real-₹1 order awaits the owner's gateway keys.
+- **Cart cookie is `Secure`** — correct behind TLS (Caddy terminates in the
+  containerized stack); local plain-http verification forced the header.
+- Stale pre-08-13 test tenants (95 `rc-`/`pr-` rows + 1,246 orphan users,
+  leaked before the suite-cleanup discipline existed) were purged from the
+  dev DB during prep.
+
+---
+
 ## First thing to do after restart
 
 ```bash

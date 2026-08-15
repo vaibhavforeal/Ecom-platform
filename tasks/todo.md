@@ -22,21 +22,24 @@ confirmation inside the order transaction).
       B1 tax+invoices · B2 promotions · B3 payments · B4 cart+storefront
       · B5 orders+console. Disjoint file ownership; builders run unit
       tests only; integration checkpoint #2 (mine) after all report.
-- [ ] **D. Checkout orchestration** (serial core): cart server module →
-      checkout-start (holdStock + pending_payment order) → payment
-      adapter contract + mock + razorpay drivers → webhook route (HMAC,
-      idempotent on gateway event id) → consumeStock + invoice
-      allocation on confirm → order state machine + domain events →
-      abandoned-cart TTL job (release holds).
-- [ ] **E. Surfaces** (parallel): storefront cart/checkout/order-status
-      pages + APIs · console orders list/detail + transitions + settings
-      for gateway credentials (envelope-encrypted) · invoice render.
-- [ ] **F. Review** (workflow): multi-dimension find → adversarial
-      verify → fix wave. Repo traps are review dimensions.
-- [ ] **G. Gate + live pass** (inline, serial): full gate; live pass on
-      production builds incl. mock-gateway ₹1 order; PROJECT_STATUS
-      verified block; PR.
+- [x] **D. B-INT integrator** — DONE 03:01; checkpoint #3 green after
+      fixing the BullMQ colon-jobId defect (silent fail-soft enqueue
+      failure invisible to all 353 passing tests — caught in stderr).
+- [x] **E. Surfaces** — shipped inside lots B2–B5 + B-INT.
+- [x] **F. Adversarial review** — DONE 03:47: 16 raised, 13 confirmed
+      (1 critical: replay minted a second gateway order), 2 refuted,
+      1 contested→deferred. Fixed by 2 parallel agents, all pinned.
+- [x] **G. Gate + live pass** — DONE ~05:00: 533 unit / 365 integration /
+      build 2/2; live COD order over HTTP (correct CGST/SGST, invoice
+      0001), mock prepaid via signed webhook on dev-mode server (IGST,
+      invoice 0002, fee economics), rate limit 429, gateway-less refusal
+      clean. PROJECT_STATUS verified block written.
 
 ## Review notes
 
-(fill as waves complete)
+Phase 2 exit criterion: everything short of the literal real-₹1 order is
+verified (that needs the owner's gateway keys — mock driver fails closed
+in production by design). Deferred items in docs/PHASE2_FOLLOWUPS.md
+"From the commerce-core wave". Orchestration lesson: agents composing
+huge single responses trip the stall detector — have them write files
+incrementally instead (cost one failed design wave).
