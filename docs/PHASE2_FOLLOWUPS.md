@@ -40,8 +40,16 @@ re-diagnosing anything on it.
 
 ## Designed follow-up tasks (from the spec, not defects)
 
-- **Reservations** (`stock_reservations`, the `reserved` column,
-  checkout holds) — `available` becomes `on_hand − reserved`.
+- ~~**Reservations**~~ **Shipped 2026-08-15** (branch `phase2/stock-reservations`).
+  `stock_reservations` table + `sale` reason (migration 0007); `holdStock`,
+  `releaseStock`, `consumeStock`, `getAvailability` in `@platform/core/inventory/server`;
+  console `/inventory` Reserved/Available columns; PDP availability subtracts active
+  holds; worker daily GC sweep. **Deviation from spec phrasing:** no physical
+  `reserved` column exists — the projection is computed-on-read
+  (`SUM(quantity) WHERE expires_at > now()`), matching the blueprint's formula
+  §4.3. The console does not purge on hold churn (deliberate, spec §4). Low-stock
+  stays keyed on on-hand (the availability projection isn't carried into
+  `stock_levels` — revisit if merchants misread the badge).
 - **CSV quantity / bulk opening balances** — absolute-quantity-to-delta
   semantics against the append-only ledger; the dry-run preview and
   idempotency need their own design pass.

@@ -370,6 +370,28 @@ the variant with 0 on-hand (0 ≤ default threshold 2). Immediate PDP flip in bo
 
 ---
 
+### Verified 2026-08-15 (stock reservations, full, all green)
+
+```
+pnpm lint                clean
+pnpm typecheck           6/6 packages
+pnpm build               2/2 Next apps      (Next 16.3.0, Turbopack)
+pnpm test                332 unit tests     (core 286, integrations 46)
+pnpm test:integration    238 tests          (console 119, core 56, db 33, storefront 18, worker 12)
+```
+
+Unit **332 unchanged** (core 286, integrations 46).
+
+Integration **218 → 238** (+20): db **33 unchanged**; core **39 → 56** (+17: new `packages/core/tests/stock-reservations.integration.test.ts` with 14 tests covering holdStock/releaseStock/consumeStock across tracked/untracked variants, expiry, availability calculation, and cross-tenant isolation — commits ba038d1 + 2cff783; plus 3 tests added to the existing `inventory-ledger.integration.test.ts` under "recordMovement vs active holds" verifying the `stock_held` guard — commit 50f1c4b); console **118 → 119** (+1: new test in `apps/console/tests/inventory-movements.integration.test.ts` covering the `stock_held` refusal when adjusting below active checkout holds — commit 1228127); storefront **17 → 18** (+1: new `apps/storefront/tests/inventory-availability.integration.test.ts` with 2 tests: PDP availability subtracts active holds, and getAvailability respects expiry — commit 2cff783); worker **11 → 12** (+1: new `apps/worker/tests/sweep-reservations.integration.test.ts` covering the daily GC sweep deleting long-expired holds across all tenants — commit 9d1c1c7).
+
+Live pass on production builds (console 3001, storefront 3010; database-backed verification with temp SQL script since holds have no HTTP surface by design): held 2 units on a tracked variant with on-hand 2 → state verified as On hand 2 / Reserved 2 / Available 0 (console `/inventory` would display these values; PDP would read out of stock); consumed the 2 units → state became 0 / 0 / 0, `sale` movement written with no actor, hold deleted (PDP would show OutOfStock immediately via purge); reset on-hand to 2, held 2 again, then released → state back to 2 / 0 / 2 with no movement written (release deleted hold without ledger row, history unchanged). Workaround: same `isProd = false` session-cookie bypass as inventory-ledger wave, reverted before commit.
+
+**Live-pass limitations:**
+- **No UI interaction:** Holds are driven server-side (checkout-start creates, payment-confirm/cancel releases); the console/PDP verification used SQL queries to inspect state rather than clicking through a full checkout flow — that flow does not exist yet (cart, checkout and payment are Phase 3). The verification script exercised holdStock/consumeStock/releaseStock and confirmed the projection (`On hand - SUM(active) = Available`) matches what the console and PDP would render.
+- **Session-cookie workaround required:** Same `isProd = false` bypass in `apps/console/src/lib/session.ts` as inventory-ledger wave, reverted before commit — working tree carries no trace.
+
+---
+
 ## First thing to do after restart
 
 ```bash
@@ -667,6 +689,14 @@ If the database volume survived, the two demo tenants are still seeded. If not:
   CHECK (on_hand >= 0) plus same-transaction upsert is what makes
   oversell impossible under concurrency — do not "optimise" the write
   into read-then-write.
+- **A cross-tenant maintenance query on the app role silently does nothing.**
+  FORCE RLS with no tenant context returns zero rows, not an error — so a
+  "DELETE all expired holds" sweep must iterate tenants (`withPlatform` for
+  the list, `withTenant` per tenant). The worker's GC job is the precedent.
+- **`stock_reservations` expiry is read-side.** A hold stops counting the
+  instant `expires_at` passes; nothing runs at expiry time, the GC is
+  hygiene-only, and NO reader may drop the `expires_at > now()` filter
+  "because the sweeper cleans up".
 
 ---
 
@@ -680,7 +710,7 @@ If the database volume survived, the two demo tenants are still seeded. If not:
 | Ekart partner agreement | API docs and credentials are gated behind a Flipkart commercial agreement | Unknown |
 | Run this on a real VPS | Local dry run verified (see `docs/DEPLOYMENT.md` for the runbook). What remains: domain + TLS (Let's Encrypt via Cloudflare DNS), R2/S3 storage (replace MinIO), OTP provider (Phase 4 blocker), backups, external monitoring | VPS setup + domain + R2 configuration |
 | ~~Storefront cache purge — blocked on a Next defect~~ | **Closed by Task 8**: both apps are on Next 16.3.0, where the tag manifest is written unconditionally. Verified live — three consecutive console writes on the same tenant each appeared on the storefront within a second, with the 300s TTL never waited on. The remaining limitation is unchanged and is a deployment fact, not a bug: one purge reaches ONE storefront process, so more than one replica needs a load balancer that fans the purge out, or a shared cache handler | Done |
-| Stock levels | Ledger shipped — `stock_movements` + `stock_levels` + opt-in `tracks_inventory`, console adjust/history, PDP sold-out. Remaining: reservations (checkout task), bulk opening balances via CSV (designed follow-up). Note: enabling tracking does not seed a low-stock threshold; the merchant sets `lowStockAt` explicitly — deferred polish | Phase 2 |
+| Stock levels | Ledger + reservations shipped — `stock_movements` + `stock_levels` + `stock_reservations`, opt-in `tracks_inventory`, console adjust/history showing Reserved/Available, PDP sold-out + hold-aware availability. Remaining: bulk opening balances via CSV (designed follow-up). Note: enabling tracking seeds the default threshold (2); the merchant can override `lowStockAt` explicitly | Phase 2 |
 
 ---
 
