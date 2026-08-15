@@ -325,6 +325,17 @@ export async function recordMovement(
       if (replay) return { ...replay, replayed: true };
     }
 
+    // Two concurrent first movements: both INSERT the projection row,
+    // loser hits the PRIMARY KEY constraint. Return a retryable 409.
+    if (pg.code === "23505" && pg.text.includes("stock_levels")) {
+      throw new AppError({
+        code: "concurrent_modification",
+        message: "Another movement created the projection row concurrently",
+        status: 409,
+        publicMessage: "Another stock movement was recorded at the same time. Please retry.",
+      });
+    }
+
     throw err;
   }
 

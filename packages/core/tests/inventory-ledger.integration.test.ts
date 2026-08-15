@@ -210,6 +210,36 @@ describe("recordMovement", () => {
       SELECT count(*)::int AS n FROM locations WHERE tenant_id = ${tenantA}`;
     expect(row!.n).toBe(1);
   });
+
+  it("two concurrent first movements: exactly one succeeds, one gets 409", async () => {
+    const freshVariant = await makeVariant(tenantA, true);
+
+    const results = await Promise.allSettled([
+      recordMovement(ctx(tenantA), { variantId: freshVariant, delta: 10, note: "race 1" }),
+      recordMovement(ctx(tenantA), { variantId: freshVariant, delta: 20, note: "race 2" }),
+    ]);
+
+    const fulfilled = results.filter((r) => r.status === "fulfilled");
+    const rejected = results.filter((r) => r.status === "rejected");
+    expect(fulfilled.length).toBe(1);
+    expect(rejected.length).toBe(1);
+
+    const rejection = (rejected[0] as PromiseRejectedResult).reason;
+    expect(rejection).toHaveProperty("status", 409);
+    expect(rejection).toHaveProperty("code", "concurrent_modification");
+
+    // Ledger consistency: exactly one movement recorded
+    const count = await movementCount(freshVariant);
+    expect(count).toBe(1);
+
+    // Projection clean: reconcile shows no drift
+    expect(await reconcileStockLevels(tenantA)).toEqual([]);
+
+    // On-hand matches the successful movement
+    const levels = await withTenant(tenantA, (tx) => getStockLevels(tx, [freshVariant]));
+    const successDelta = (fulfilled[0] as PromiseFulfilledResult<any>).value.delta;
+    expect(levels.get(freshVariant)).toBe(successDelta);
+  });
 });
 
 describe("listInventory", () => {
