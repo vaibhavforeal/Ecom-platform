@@ -18,7 +18,7 @@ import {
   urlSlugs,
   withTenant,
 } from "@platform/db";
-import { getStockLevels } from "../inventory/server";
+import { getAvailability } from "../inventory/server";
 import type { SlugEntityType, Tx } from "@platform/db";
 
 import { RANK_FUNCTION, SEARCH_TEXT_CONFIG, TSQUERY_FUNCTION } from "./search";
@@ -86,7 +86,7 @@ export type ProductDetail = {
     weightGrams: number;
     isActive: boolean;
     tracksInventory: boolean;
-    /** Summed on-hand for tracked variants; null = untracked = always available. */
+    /** on_hand − active holds (clamped at 0) for tracked variants; null = untracked = always available. */
     available: number | null;
   }[];
   images: {
@@ -437,7 +437,7 @@ export async function getProductById(
     ]);
 
     const trackedIds = variantRows.filter((v) => v.tracksInventory).map((v) => v.id);
-    const levels = await getStockLevels(tx, trackedIds);
+    const levels = await getAvailability(tx, trackedIds);
 
     const slug = slugs.get(productId);
     if (!slug) return null;
@@ -477,7 +477,7 @@ export async function getProductById(
         weightGrams: v.weightGrams,
         isActive: v.isActive,
         tracksInventory: v.tracksInventory,
-        available: v.tracksInventory ? (levels.get(v.id) ?? 0) : null,
+        available: v.tracksInventory ? (levels.get(v.id)?.available ?? 0) : null,
       })),
       images: imageRows,
       categoryIds: categoryRows.map((c) => c.categoryId),
