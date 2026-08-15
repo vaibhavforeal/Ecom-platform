@@ -50,6 +50,13 @@
       "when": 1786784528652,
       "tag": "0006_low_stock_backfill",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1786796354499,
+      "tag": "0007_nasty_the_watchers",
+      "breakpoints": true
     }
   ]
 }

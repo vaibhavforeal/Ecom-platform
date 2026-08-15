@@ -114,6 +114,8 @@ export type SearchIndexing = (typeof SEARCH_INDEXING_MODES)[number];
  * feature — the CHECK constraint is the single source of truth.
  * `opening_balance` is chosen automatically for a variant's first
  * movement; everything merchant-initiated after that is `adjustment`.
+ * `sale` is written ONLY by consumeStock (a consumed checkout hold) —
+ * no route accepts a client-supplied reason.
  */
-export const STOCK_MOVEMENT_REASONS = ["opening_balance", "adjustment"] as const;
+export const STOCK_MOVEMENT_REASONS = ["opening_balance", "adjustment", "sale"] as const;
 export type StockMovementReason = (typeof STOCK_MOVEMENT_REASONS)[number];
