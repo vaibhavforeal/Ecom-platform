@@ -397,6 +397,14 @@ export const productVariants = pgTable(
     dimsMm: jsonb("dims_mm"),
 
     lowStockAt: integer("low_stock_at").default(2),
+    /**
+     * Opt-in inventory tracking (blueprint §4.5). OFF by default so
+     * existing catalogs are untouched — an untracked variant is always
+     * sellable and shows no stock anywhere. Toggling it on starts the
+     * ledger at zero; the merchant sets an opening balance through the
+     * adjust dialog.
+     */
+    tracksInventory: boolean("tracks_inventory").notNull().default(false),
     imageMediaId: uuid("image_media_id").references(() => media.id, { onDelete: "set null" }),
 
     position: integer("position").notNull().default(0),

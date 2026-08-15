@@ -141,7 +141,9 @@ export function rlsStatementsFor(table: string): string[] {
  */
 export function grantStatements(appRole: string): string[] {
   const tables = allTables().map((t) => t.name);
-  const appendOnly = new Set(["audit_log"]);
+  // An audit trail — or a stock ledger — the application can rewrite is
+  // neither. Both are append-only by ABSENT GRANT, not by discipline.
+  const appendOnly = new Set(["audit_log", "stock_movements"]);
 
   const stmts = [
     `GRANT USAGE ON SCHEMA public TO ${appRole};`,

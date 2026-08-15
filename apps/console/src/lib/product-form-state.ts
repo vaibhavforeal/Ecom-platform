@@ -39,6 +39,7 @@ export type VariantFormRow = {
   weightGrams: string;
   lowStockAt: string;
   imageMediaId: string;
+  tracksInventory: boolean;
   isActive: boolean;
 };
 
@@ -123,6 +124,7 @@ export function blankVariant(options: OptionSelection = {}): VariantFormRow {
     weightGrams: "",
     lowStockAt: "",
     imageMediaId: "",
+    tracksInventory: false,
     isActive: true,
   };
 }
@@ -188,6 +190,7 @@ export function toFormState(product: ConsoleProduct): ProductFormState {
       weightGrams: String(v.weightGrams),
       lowStockAt: v.lowStockAt === null ? "" : String(v.lowStockAt),
       imageMediaId: v.imageMediaId ?? "",
+      tracksInventory: v.tracksInventory,
       isActive: v.isActive,
     })),
     categoryIds: product.categoryIds,

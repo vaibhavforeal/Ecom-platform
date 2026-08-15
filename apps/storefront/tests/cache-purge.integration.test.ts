@@ -169,6 +169,7 @@ async function makeProduct(
           costPaise: null,
           weightGrams: 240,
           lowStockAt: null,
+          tracksInventory: false,
           imageMediaId: null,
           isActive: true,
         },

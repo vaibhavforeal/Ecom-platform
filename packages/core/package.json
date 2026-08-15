@@ -10,7 +10,9 @@
     "./audit": "./src/audit/index.ts",
     "./catalog": "./src/catalog/index.ts",
     "./catalog/server": "./src/catalog/server.ts",
-    "./media": "./src/media/index.ts"
+    "./media": "./src/media/index.ts",
+    "./inventory": "./src/inventory/index.ts",
+    "./inventory/server": "./src/inventory/server.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

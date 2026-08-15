@@ -7,10 +7,13 @@ import {
   listMediaForConsole,
   listTaxonomyForConsole,
 } from "@platform/core/catalog/server";
+import { getStockLevels } from "@platform/core/inventory/server";
+import { withTenant } from "@platform/db";
 
 import { mediaUrl } from "../../../lib/media-url";
 import { toFormState, toMediaOption } from "../../../lib/product-form-state";
 import { requireActor } from "../../../lib/session";
+import { AdjustStock } from "../../inventory/AdjustStock";
 import { ProductForm } from "../ProductForm";
 
 export const dynamic = "force-dynamic";
@@ -44,6 +47,14 @@ export default async function EditProductPage({ params }: { params: Promise<{ id
   // context, so a cross-tenant id lands here as a plain 404.
   if (!product) notFound();
 
+  const trackedVariants = product.variants.filter((v) => v.tracksInventory);
+  const levels =
+    trackedVariants.length > 0
+      ? await withTenant(actor.tenantId, (tx) =>
+          getStockLevels(tx, trackedVariants.map((v) => v.id)),
+        )
+      : new Map<string, number>();
+
   // The gallery's own images may be older than the 60 most recent
   // uploads the picker offers, so the two lists are merged rather than
   // assumed to overlap — otherwise an attached image renders as a blank
@@ -71,6 +82,46 @@ export default async function EditProductPage({ params }: { params: Promise<{ id
         historicalSlugs={product.historicalSlugs}
         canWrite={can(actor, "catalog:write")}
       />
+
+      {trackedVariants.length > 0 && can(actor, "inventory:read") && (
+        <div className="panel">
+          <h2 className="section">Inventory</h2>
+          <table className="grid">
+            <thead>
+              <tr>
+                <th>SKU</th>
+                <th style={{ textAlign: "right" }}>On hand</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {trackedVariants.map((v) => (
+                <tr key={v.id}>
+                  <td>
+                    <code>{v.sku}</code>
+                  </td>
+                  <td style={{ textAlign: "right" }}>{levels.get(v.id) ?? 0}</td>
+                  <td style={{ textAlign: "right" }}>
+                    <AdjustStock
+                      variantId={v.id}
+                      sku={v.sku}
+                      onHand={levels.get(v.id) ?? 0}
+                      canWrite={can(actor, "inventory:write")}
+                    />{" "}
+                    <Link href={`/inventory/${v.id}`} className="chip">
+                      History
+                    </Link>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p className="muted">
+            A newly tracked variant starts at zero — record its opening balance here before it
+            reads as out of stock on the storefront.
+          </p>
+        </div>
+      )}
     </main>
   );
 }

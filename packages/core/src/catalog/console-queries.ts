@@ -218,6 +218,7 @@ export type ConsoleVariant = {
   currency: string;
   weightGrams: number;
   lowStockAt: number | null;
+  tracksInventory: boolean;
   imageMediaId: string | null;
   isActive: boolean;
 };
@@ -392,6 +393,7 @@ export async function getProductForConsoleInTx(
       currency: v.currency,
       weightGrams: v.weightGrams,
       lowStockAt: v.lowStockAt,
+      tracksInventory: v.tracksInventory,
       imageMediaId: v.imageMediaId,
       isActive: v.isActive,
     })),
@@ -607,6 +609,7 @@ export async function listProductsForExport(
         currency: v.currency,
         weightGrams: v.weightGrams,
         lowStockAt: v.lowStockAt,
+        tracksInventory: v.tracksInventory,
         imageMediaId: v.imageMediaId,
         isActive: v.isActive,
       });

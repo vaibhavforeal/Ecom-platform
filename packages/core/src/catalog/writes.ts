@@ -158,6 +158,8 @@ export type VariantInput = {
   costPaise: number | null;
   weightGrams: number;
   lowStockAt: number | null;
+  /** Opt-in ledger tracking (§4.5). Untracked = always sellable, no stock shown. */
+  tracksInventory: boolean;
   imageMediaId: string | null;
   isActive: boolean;
 };
@@ -561,6 +563,7 @@ async function writeVariants(
       costPaise: variant.costPaise,
       weightGrams: variant.weightGrams,
       lowStockAt: variant.lowStockAt,
+      tracksInventory: variant.tracksInventory,
       imageMediaId: variant.imageMediaId,
       isActive: variant.isActive,
       position,

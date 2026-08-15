@@ -135,6 +135,7 @@ export const CSV_COLUMNS = [
   "weight_grams",
   "low_stock_at",
   "variant_active",
+  "variant_tracks_inventory",
 ] as const;
 
 export type CsvColumn = (typeof CSV_COLUMNS)[number];
@@ -429,6 +430,7 @@ export type ExportVariant = {
   weightGrams: number;
   lowStockAt: number | null;
   isActive: boolean;
+  tracksInventory: boolean;
 };
 
 /**
@@ -479,6 +481,7 @@ export function productToCsvRows(product: ExportProduct): string[] {
     cells.weight_grams = String(variant.weightGrams);
     cells.low_stock_at = variant.lowStockAt === null ? "" : String(variant.lowStockAt);
     cells.variant_active = variant.isActive ? "true" : "false";
+    cells.variant_tracks_inventory = variant.tracksInventory ? "true" : "false";
 
     return formatCsvRecord(CSV_COLUMNS.map((column) => cells[column] ?? ""));
   });
@@ -507,6 +510,7 @@ export type CsvVariantDraft = {
   costPaise?: number | null;
   lowStockAt?: number | null;
   isActive?: boolean;
+  tracksInventory?: boolean;
   /** Absent when the file carries no option columns at all. */
   options?: OptionSelection;
 };
@@ -1098,6 +1102,13 @@ function readVariant(
      * "cleared" would mean "buyable".
      */
     draft.isActive = readBoolean(cell("variant_active") ?? "", "variant_active", report);
+  }
+  if (has("variant_tracks_inventory")) {
+    draft.tracksInventory = readBoolean(
+      cell("variant_tracks_inventory") ?? "",
+      "variant_tracks_inventory",
+      report
+    );
   }
 
   return draft;

@@ -139,6 +139,7 @@ const variantSchema = z.object({
    */
   weightGrams: z.number().int().min(0).max(500_000),
   lowStockAt: z.number().int().min(0).max(100_000).nullable().default(null),
+  tracksInventory: z.boolean().default(false),
   imageMediaId: z.string().uuid().nullable().default(null),
   isActive: z.boolean().default(true),
 });
@@ -207,6 +208,7 @@ export function toProductWriteInput(payload: ProductPayload): ProductWriteInput 
       costPaise: v.cost,
       weightGrams: v.weightGrams,
       lowStockAt: v.lowStockAt,
+      tracksInventory: v.tracksInventory,
       imageMediaId: v.imageMediaId,
       isActive: v.isActive,
     })),
