@@ -316,35 +316,44 @@ pnpm test                328 unit tests     (core 282, integrations 46)
 pnpm test:integration    212 tests          (console 115, core 36, db 33, storefront 17, worker 11)
 ```
 
-Unit **325 → 328**: core **279 → 282** (+3 from `inventory/index.test.ts`: `isLowStock`,
-`firstMovementProjection`, and the oversell race mapping to 409 — commit `ed00d4a` + `8aac626`).
-Integrations unchanged (46).
+Unit **325 → 328**: core **279 → 282** (+3 from CSV blank-cell preservation: one test
+in `packages/core/tests/catalog-csv.test.ts` verifying blank cells leave tracksInventory
+undefined, commit 18aecff; two tests in `packages/core/tests/catalog.test.ts` covering
+`mergeVariant` behavior — stored-value preservation when CSV is blank, and the false
+default when no stored variant exists, commit b229e75). Integrations unchanged (46).
 
-Integration **191 → 212** (+21): db **32 → 33** (+1, new `inventory-ledger.test.ts`
-covering the upsert-based stock_levels write, the CHECK (on_hand >= 0) oversell block,
-and ledger row locking — commit `752d039`); core **25 → 36** (+11, not the +10 estimated:
-new `inventory-movements.integration.test.ts` with the end-to-end movement write including
-tenant visibility, permission gates, untracked refusal, oversell refusal, the opening-balance
-reason mapping, idempotent replay, concurrent writes staying atomic, and zero ledger rows
-surviving any validation failure — commits `ed00d4a` + `8aac626`); console **107 → 115**
-(+8, not the +9 estimated: new `inventory-movements.integration.test.ts` covering the
-POST route with auth/authz gates, validation, the 422 oversell refusal, atomicity with
-purge, and the identical zero-ledger guarantee — commits `b2cb7b9` + `5e0e0ca`); storefront
-**16 → 17** (+1, PDP tracking/availability test — commit `a4c42c2`); worker unchanged (11).
+Integration **191 → 212** (+21): db **32 → 33** (+1, the `it.each(["audit_log","stock_movements"])`
+expansion in `packages/db/tests/isolation.test.ts` verifying both history tables deny UPDATE/DELETE
+to the app role — commit 752d039); core **25 → 36** (+11, not the +10 estimated:
+new `packages/core/tests/inventory-ledger.integration.test.ts` with end-to-end movement
+writes covering tenant visibility, untracked/oversell refusal, opening-balance reason mapping,
+idempotent replay, concurrent writes staying atomic, and zero ledger rows surviving validation
+failure — commits ed00d4a + 8aac626; permission gates are tested in the console suite, not here); console **107 → 115**
+(+8, not the +9 estimated: new `apps/console/tests/inventory-movements.integration.test.ts`
+covering the POST /api/inventory/movements route with auth/authz gates, validation, 422
+oversell refusal, atomicity with purge, and the zero-ledger guarantee — commits b2cb7b9 + 5e0e0ca); storefront
+**16 → 17** (+1, `apps/storefront/tests/inventory-availability.integration.test.ts` covering
+PDP tracking/availability — commit a4c42c2); worker unchanged (11).
+
+**Post-gate fix wave (2026-08-15):** Final review findings addressed in separate commit(s).
+Unit tests +4 (`packages/core/tests/inventory.test.ts` covering `isLowStock` boundaries),
+integration tests +3 (idempotency fingerprint verification: same key + different delta/variant → 422;
+exact-match replay still works). Gate now runs at 332 unit / 215 integration.
 
 Live pass on production builds (console 3001, storefront 3010): enabled tracking on one
 variant of a three-variant product → inventory panel showed 0 on-hand, PDP showed
 `OutOfStock`; adjusted +5 with note "opening count" → `/inventory` listed the variant at 5,
-PDP flipped to `InStock` **immediately** (purge working); adjusted -6 with note "sold at
-exhibition" → PDP flipped to `OutOfStock` immediately, history page showed three movements
-newest-first with notes and staff name; `/inventory?low=1` listed the variant with 0 on-hand
-(0 ≤ default threshold 2). Immediate PDP flip in both directions verified.
+PDP flipped to `InStock` **immediately** (purge working); adjusted +1 with note "purge trigger"
+to verify purge after env-var fix; adjusted -6 with note "sold at exhibition" → PDP flipped to
+`OutOfStock` immediately, history page showed three movements newest-first (+5 "opening count",
++1 "purge trigger", -6 "sold at exhibition") with notes and staff name; `/inventory?low=1` listed
+the variant with 0 on-hand (0 ≤ default threshold 2). Immediate PDP flip in both directions verified.
 
 **Live-pass limitations:**
 - **Step 8 not verified live:** the untracked-variants-render-unchanged path was not exercised
   because the `PUT /api/products/{id}` route's whole-set replace semantics made the attempted
   partial payload soft-delete the other variants. This path is covered by Task 6's storefront
-  integration test (`tracking-availability.integration.test.ts`) instead.
+  integration test (`apps/storefront/tests/inventory-availability.integration.test.ts`) instead.
 - **Session-cookie workaround required:** local production-build verification required temporarily
   bypassing the `__Host-` cookie's HTTPS requirement in `apps/console/src/lib/session.ts`
   (forced `isProd = false`), reverted before commit — the working tree carries no trace.
