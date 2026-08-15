@@ -48,9 +48,27 @@ export const maintenanceQueue = new Queue<Record<string, never>>(
   { connection, defaultJobOptions },
 );
 
+/**
+ * Order domain events (jobId = order_events.id, D11) + the delayed
+ * `checkout.expire` jobs. The worker also PRODUCES onto this queue: a
+ * still-pending expiry re-enqueues itself at the extended expires_at.
+ */
+export const ordersQueue = new Queue<TenantJob<Record<string, unknown>>>(
+  QUEUE_NAMES.orders,
+  { connection, defaultJobOptions },
+);
+
+/** Outbound gateway work — refunds run here, never in a web request. */
+export const paymentsQueue = new Queue<TenantJob<{ refundId: string }>>(
+  QUEUE_NAMES.payments,
+  { connection, defaultJobOptions },
+);
+
 export async function closeQueues(): Promise<void> {
   await domainsQueue.close();
   await mediaQueue.close();
   await maintenanceQueue.close();
+  await ordersQueue.close();
+  await paymentsQueue.close();
   await connection.quit();
 }

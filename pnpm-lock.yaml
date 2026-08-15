@@ -93,6 +93,9 @@ importers:
       '@platform/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@platform/integrations':
+        specifier: workspace:*
+        version: link:../../packages/integrations
       next:
         specifier: ^16.3.0
         version: 16.3.0(@types/node@22.20.1)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)

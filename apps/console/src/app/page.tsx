@@ -35,7 +35,13 @@ export default async function DashboardPage() {
         Signed in as {actor.name ?? actor.phoneE164} · {actor.role}
       </p>
 
-      {(can(actor, "catalog:read") || can(actor, "settings:read") || can(actor, "inventory:read")) && (
+      {(can(actor, "catalog:read") ||
+        can(actor, "settings:read") ||
+        can(actor, "inventory:read") ||
+        can(actor, "orders:read") ||
+        can(actor, "customers:read") ||
+        can(actor, "promotions:read") ||
+        can(actor, "payments:write")) && (
         <nav className="toolbar">
           {can(actor, "catalog:read") && (
             <>
@@ -50,6 +56,26 @@ export default async function DashboardPage() {
           {can(actor, "inventory:read") && (
             <Link href="/inventory" className="chip">
               Inventory
+            </Link>
+          )}
+          {can(actor, "orders:read") && (
+            <Link href="/orders" className="chip">
+              Orders
+            </Link>
+          )}
+          {can(actor, "customers:read") && (
+            <Link href="/customers" className="chip">
+              Customers
+            </Link>
+          )}
+          {can(actor, "promotions:read") && (
+            <Link href="/promotions" className="chip">
+              Promotions
+            </Link>
+          )}
+          {can(actor, "payments:write") && (
+            <Link href="/settings/payments" className="chip">
+              Payments
             </Link>
           )}
           {can(actor, "settings:read") && (

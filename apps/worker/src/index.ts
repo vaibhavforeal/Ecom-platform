@@ -7,8 +7,12 @@ import { Worker } from "bullmq";
 import { closeRedis } from "@platform/core";
 import { closeConnections } from "@platform/db";
 
+import { processGatewayRefund } from "./jobs/gateway-refund";
+import type { GatewayRefundJob } from "./jobs/gateway-refund";
+import { handleOrdersJob } from "./jobs/order-events";
 import { processMedia } from "./jobs/process-media";
 import type { ProcessMediaJob } from "./jobs/process-media";
+import { sweepCheckouts } from "./jobs/sweep-checkouts";
 import { sweepReservations } from "./jobs/sweep-reservations";
 import { verifyDomain } from "./jobs/verify-domain";
 import type { VerifyDomainJob } from "./jobs/verify-domain";
@@ -61,12 +65,51 @@ const workers = [
   new Worker(
     QUEUE_NAMES.maintenance,
     async (job) => {
-      log("job.start", { queue: job.queueName, jobId: job.id });
-      const result = await sweepReservations();
-      log("job.done", { jobId: job.id, ...result });
+      log("job.start", { queue: job.queueName, jobId: job.id, name: job.name });
+      const result =
+        job.name === "sweep-checkouts" ? await sweepCheckouts() : await sweepReservations();
+      log("job.done", { jobId: job.id, name: job.name, ...result });
       return result;
     },
     { connection, concurrency: 1 },
+  ),
+
+  /**
+   * Order domain events + delayed checkout expiry. The log seam is
+   * cheap, but expiry does real (idempotent) database work per order —
+   * a modest concurrency keeps a burst of expiries from starving the
+   * pool.
+   */
+  new Worker(
+    QUEUE_NAMES.orders,
+    async (job) => {
+      log("job.start", {
+        queue: job.queueName,
+        jobId: job.id,
+        name: job.name,
+        tenantId: (job.data as { tenantId?: string }).tenantId,
+      });
+      const result = await handleOrdersJob({ name: job.name, data: job.data });
+      log("job.done", { jobId: job.id, name: job.name, ...result });
+      return result;
+    },
+    { connection, concurrency: 5 },
+  ),
+
+  /**
+   * Outbound gateway refunds (spec §4.7.2): external-API work, so it
+   * runs narrow and leans on the queue's exponential backoff + retained
+   * dead letters rather than in-process retry loops.
+   */
+  new Worker<GatewayRefundJob>(
+    QUEUE_NAMES.payments,
+    async (job) => {
+      log("job.start", { queue: job.queueName, jobId: job.id, tenantId: job.data.tenantId });
+      const result = await processGatewayRefund(job.data);
+      log("job.done", { jobId: job.id, tenantId: job.data.tenantId, ...result });
+      return result;
+    },
+    { connection, concurrency: 2 },
   ),
 ];
 
@@ -90,6 +133,14 @@ log("worker.started", { queues: workers.map((w) => w.name) });
 maintenanceQueue
   .upsertJobScheduler("sweep-reservations", { every: 86_400_000 })
   .then(() => log("scheduler.registered", { job: "sweep-reservations" }))
+  .catch((err) => log("worker.error", { queue: "maintenance", error: (err as Error).message }));
+
+// Abandoned-checkout backstop sweep, every 10 minutes (D10). The
+// explicit job-name template is what the maintenance handler switches
+// on.
+maintenanceQueue
+  .upsertJobScheduler("sweep-checkouts", { every: 600_000 }, { name: "sweep-checkouts" })
+  .then(() => log("scheduler.registered", { job: "sweep-checkouts" }))
   .catch((err) => log("worker.error", { queue: "maintenance", error: (err as Error).message }));
 
 /**
