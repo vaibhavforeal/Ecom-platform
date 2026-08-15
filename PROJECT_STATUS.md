@@ -390,6 +390,14 @@ Live pass on production builds (console 3001, storefront 3010; database-backed v
 - **No UI interaction:** Holds are driven server-side (checkout-start creates, payment-confirm/cancel releases); the console/PDP verification used SQL queries to inspect state rather than clicking through a full checkout flow — that flow does not exist yet (cart, checkout and payment are Phase 3). The verification script exercised holdStock/consumeStock/releaseStock and confirmed the projection (`On hand - SUM(active) = Available`) matches what the console and PDP would render.
 - **Session-cookie workaround required:** Same `isProd = false` bypass in `apps/console/src/lib/session.ts` as inventory-ledger wave, reverted before commit — working tree carries no trace.
 
+**Gate re-run 2026-08-15 on the final tree (post review-fix `fc52e26`):** identical
+counts — lint clean, typecheck 6/6, build 2/2, 332 unit, 238 integration.
+Integration was run fresh (`turbo run test:integration --force`); the review fix's
+2-line test change modified existing tests, adding none. Note: `pnpm
+test:integration -- --force` does NOT do this — pnpm's `--` forwards the flag
+through turbo into vitest, which rejects `--force` and exits 1 with no test
+output. Force turbo directly.
+
 ---
 
 ## First thing to do after restart
