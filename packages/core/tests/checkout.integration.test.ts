@@ -6,7 +6,10 @@ import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { closeConnections } from "@platform/db";
-import { closeRedis, sealCredentials, credentialFingerprint } from "@platform/core";
+import { Queue } from "bullmq";
+
+import { QUEUE_NAMES, closeRedis, redis, sealCredentials, credentialFingerprint } from "@platform/core";
+import { upsertLine } from "@platform/core/cart/server";
 import {
   confirmCodOrder,
   confirmFromWebhookEvent,
@@ -446,6 +449,58 @@ describe("checkout-start spine (§4.2)", () => {
     }
   });
 
+  it("a GST-regular tenant with no origin state refuses checkout with seller_state_unconfigured", async () => {
+    const variant = await makeVariant({ tracks: false });
+    const cartId = await makeCart([{ variantId: variant, quantity: 1 }]);
+    await admin`UPDATE tenants SET origin_state_code = NULL WHERE id = ${tenantA}`;
+    try {
+      // Pre-fix this silently taxed the same-state sale as inter-state
+      // IGST ('' never equals the buyer's state) and froze an empty
+      // seller state into the invoice.
+      const p = payload({ paymentMode: "cod" });
+      await expect(startCheckout(ctx(), cartId, p)).rejects.toMatchObject({
+        code: "seller_state_unconfigured",
+        status: 422,
+      });
+      expect((await orderByKey(p.idempotencyKey)).length).toBe(0);
+
+      // Unregistered sellers charge no GST (Bill of Supply) — a missing
+      // origin state must NOT block them.
+      await admin`
+        UPDATE tenants SET tax_registration_type = 'unregistered', gstin = NULL
+        WHERE id = ${tenantA}`;
+      const res = await startCheckout(ctx(), cartId, payload({ paymentMode: "cod" }));
+      expect(res.status).toBe("confirmed");
+      const invoices = await invoiceFor(res.orderId);
+      expect(invoices.length).toBe(1);
+      expect(invoices[0]!.doc_type).toBe("bill_of_supply");
+    } finally {
+      await admin`
+        UPDATE tenants SET origin_state_code = '29', tax_registration_type = 'regular',
+          gstin = '29ABCDE1234F1Z5'
+        WHERE id = ${tenantA}`;
+    }
+  });
+
+  it("cart mutations refuse with 409 cart_not_active once checkout has converted the cart", async () => {
+    const variant = await makeVariant({ tracks: false });
+    const extra = await makeVariant({ tracks: false });
+    const cartId = await makeCart([{ variantId: variant, quantity: 1 }]);
+    const res = await startCheckout(ctx(), cartId, payload({ paymentMode: "cod" }));
+    expect(res.status).toBe("confirmed");
+
+    // Pre-fix the plain status SELECT let a line land on a converted
+    // cart (silently absent from the snapshotted order); the mutation
+    // door now locks the cart row and refuses.
+    await expect(upsertLine(ctx(), cartId, { variantId: extra, quantity: 1 })).rejects.toMatchObject({
+      code: "cart_not_active",
+      status: 409,
+    });
+    const lines = await admin<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM cart_lines WHERE cart_id = ${cartId} AND variant_id = ${extra}`;
+    expect(lines[0]!.n).toBe(0);
+  });
+
   it("COD is refused when the merchant disabled it (payments.cod_enabled = false)", async () => {
     await admin`
       INSERT INTO store_settings (tenant_id, key, value)
@@ -662,6 +717,66 @@ describe("COD confirms at placement (D5)", () => {
     expect((await invoiceFor(res.orderId)).length).toBe(1);
   });
 
+  it("a zero-total prepaid checkout confirms on a store with NO enabled gateway (§4.2.6)", async () => {
+    const promoId = await makePromotion({
+      code: "NOGW" + randomUUID().slice(0, 6).toUpperCase().replaceAll("-", ""),
+      effects: [{ type: "percent_off", bps: 10000 }],
+    });
+    const [promo] = await admin<{ code: string }[]>`SELECT code FROM promotions WHERE id = ${promoId}`;
+    const variant = await makeVariant();
+    await seed(variant, 5);
+    const cartId = await makeCart([{ variantId: variant, quantity: 1 }]);
+    const gatewayCallsBefore = gatewayCalls.length;
+
+    await admin`UPDATE payment_accounts SET is_enabled = false WHERE tenant_id = ${tenantA}`;
+    try {
+      // Pre-fix: 422 payments_not_configured — the account gate ran
+      // before the total was known.
+      const res = await startCheckout(
+        ctx(),
+        cartId,
+        payload({ paymentMode: "prepaid", couponCode: promo!.code }),
+      );
+      expect(res.status).toBe("confirmed");
+      expect(gatewayCalls.length).toBe(gatewayCallsBefore);
+      const order = await orderRow(res.orderId);
+      expect(order.status).toBe("confirmed");
+      expect(order.payment_status).toBe("paid");
+      expect(Number(order.total_paise)).toBe(0);
+      expect((await invoiceFor(res.orderId)).length).toBe(1);
+    } finally {
+      await admin`UPDATE payment_accounts SET is_enabled = true WHERE tenant_id = ${tenantA}`;
+    }
+  });
+
+  it("a NON-zero prepaid checkout on a gateway-less store refuses payments_not_configured and strands nothing", async () => {
+    const variant = await makeVariant();
+    await seed(variant, 5);
+    const cartId = await makeCart([{ variantId: variant, quantity: 1 }]);
+    const p = payload();
+
+    await admin`UPDATE payment_accounts SET is_enabled = false WHERE tenant_id = ${tenantA}`;
+    try {
+      await expect(startCheckout(ctx(), cartId, p)).rejects.toMatchObject({
+        code: "payments_not_configured",
+        status: 422,
+      });
+      // The pending order was cancelled, its holds released, and the
+      // cart handed back so the buyer can retry with COD.
+      const [order] = await orderByKey(p.idempotencyKey);
+      expect(order!.status).toBe("cancelled");
+      expect(order!.cancel_reason).toBe("payments_not_configured");
+      expect(await holdCount(order!.id as string)).toBe(0);
+      const [cart] = await admin<{ status: string }[]>`SELECT status FROM carts WHERE id = ${cartId}`;
+      expect(cart!.status).toBe("active");
+
+      const retry = await startCheckout(ctx(), cartId, payload({ paymentMode: "cod", phone: p.phone }));
+      expect(retry.status).toBe("confirmed");
+    } finally {
+      await admin`UPDATE payment_accounts SET is_enabled = true WHERE tenant_id = ${tenantA}`;
+    }
+  });
+
   it("COD oversold (stolen unit): cancel + order.oversold, NO invoice, NO redemption, buyer-worded 422 (D2a)", async () => {
     const variant = await makeVariant();
     await seed(variant, 1);
@@ -800,6 +915,41 @@ describe("webhook confirm (§4.4)", () => {
     expect(payment!.status).toBe("failed");
     expect(payment!.error_code).toBe("BAD_UPI");
     expect(await eventNames(start.orderId)).toContain("payment.failed");
+  });
+
+  it("payment.amount_mismatch and payment.failed events land on the orders queue (jobId = order_events.id, §5.2)", async () => {
+    const variant = await makeVariant();
+    await seed(variant, 5);
+    const start = await startCheckout(ctx(), await makeCart([{ variantId: variant, quantity: 1 }]), payload());
+    if (start.status !== "payment_required") throw new Error("expected payment_required");
+
+    await deliverWebhook(capturedEvent(start.gatewayOrderId, start.amountPaise - 1)); // mismatch
+    await deliverWebhook({
+      eventId: "evt_test_" + randomUUID(),
+      type: "payment.failed",
+      gatewayOrderId: start.gatewayOrderId,
+      gatewayPaymentId: "pay_test_" + randomUUID().slice(0, 12),
+      amountPaise: start.amountPaise,
+      error: { code: "BAD_UPI", description: "The UPI transaction failed." },
+    });
+
+    const rows = await admin<{ id: string; event: string }[]>`
+      SELECT id, event FROM order_events
+      WHERE order_id = ${start.orderId} AND event IN ('payment.amount_mismatch', 'payment.failed')
+      ORDER BY event`;
+    expect(rows.map((r) => r.event)).toEqual(["payment.amount_mismatch", "payment.failed"]);
+
+    // Pre-fix the descriptors were discarded after the tx: the row
+    // existed but no job ever reached the §5.2 worker seam.
+    const ordersQueue = new Queue(QUEUE_NAMES.orders, { connection: redis() });
+    try {
+      for (const row of rows) {
+        const job = await ordersQueue.getJob(row.id);
+        expect(job, `expected an orders-queue job for ${row.event}`).toBeTruthy();
+      }
+    } finally {
+      await ordersQueue.close();
+    }
   });
 
   it("an unknown gateway order ref is acknowledged and ignored (send-test-event contract, D19)", async () => {

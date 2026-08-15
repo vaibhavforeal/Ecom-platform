@@ -520,6 +520,19 @@ describe("abandoned expiry + late capture (§4.6, D9)", () => {
     const events = await admin<{ event: string }[]>`
       SELECT event FROM order_events WHERE order_id = ${res.orderId}`;
     expect(events.map((e) => e.event)).toContain("payment.late_captured");
+
+    // §5.2: the payment.late_captured event rides the orders queue like
+    // every other cataloged event (jobId = order_events.id) — pre-fix the
+    // descriptor was discarded and only the refund job was enqueued.
+    const [lateEvt] = await admin<{ id: string }[]>`
+      SELECT id FROM order_events
+      WHERE order_id = ${res.orderId} AND event = 'payment.late_captured'`;
+    const ordersQueue = new Queue(QUEUE_NAMES.orders, { connection: redis() });
+    try {
+      expect(await ordersQueue.getJob(lateEvt!.id)).toBeTruthy();
+    } finally {
+      await ordersQueue.close();
+    }
   });
 
   it("late-capture redelivery keeps ONE refund row and ONE late_captured event", async () => {

@@ -53,15 +53,34 @@ function invalidPayload(path: string, message: string): AppError {
   });
 }
 
-/** SELECT the active cart or throw 404. Inside the caller's tx. */
+/**
+ * Lock the cart row FOR UPDATE and verify it is still mutable, inside
+ * the caller's tx. The lock serializes cart mutations against
+ * checkout's TX-A (which locks the cart, snapshots the lines and
+ * converts it): with a plain status SELECT a line write could slip in
+ * after checkout's snapshot but before its commit and be silently
+ * absent from the order. Blocking here until TX-A settles means the
+ * re-read sees the converted status and refuses instead. 404 when the
+ * cart does not exist; 409 `cart_not_active` when it is not mutable.
+ */
 async function loadActiveCart(tx: Tx, tenantId: string, cartId: string): Promise<{ id: string }> {
   if (!UUID_RE.test(cartId)) throw cartNotFound();
   const [cart] = await tx
-    .select({ id: carts.id })
+    .select({ id: carts.id, status: carts.status })
     .from(carts)
-    .where(and(eq(carts.tenantId, tenantId), eq(carts.id, cartId), eq(carts.status, "active")))
-    .limit(1);
+    .where(and(eq(carts.tenantId, tenantId), eq(carts.id, cartId)))
+    .limit(1)
+    .for("update");
   if (!cart) throw cartNotFound();
+  if (cart.status !== "active") {
+    throw new AppError({
+      code: "cart_not_active",
+      message: `Cart ${cartId} is ${cart.status}; mutations require an active cart`,
+      status: 409,
+      publicMessage:
+        "This cart has already been checked out. If your payment is pending, finish it from the payment page.",
+    });
+  }
   return cart;
 }
 

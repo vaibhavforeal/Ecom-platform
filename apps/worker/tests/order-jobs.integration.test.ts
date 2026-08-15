@@ -307,4 +307,26 @@ describe("gateway-refund job (§4.7.2)", () => {
     const replay = await processGatewayRefund({ tenantId: tenantA, refundId });
     expect(replay.status).toBe("already_processing");
   });
+
+  it("NEVER re-calls the gateway for a 'processing' refund with no gateway ref (claim-first crash window)", async () => {
+    const { refundId } = await makeRefundFixture();
+
+    // Simulate the crash window: the job claimed the row (pending →
+    // processing) and died before recording the gateway ref. Whether the
+    // gateway call happened is unknowable from here — a re-call could
+    // move the money twice.
+    await admin`UPDATE refunds SET status = 'processing' WHERE id = ${refundId}`;
+
+    const result = await processGatewayRefund({ tenantId: tenantA, refundId });
+    expect(result.status).toBe("needs_reconciliation");
+    expect(result.gatewayRefundId).toBeUndefined();
+
+    // The adapter was NOT called again: the mock driver deterministically
+    // mints rfnd_mock_<sha256(refundId)[:20]> and the job records it on
+    // success, so a re-issued call would have left a gateway ref here.
+    const [row] = await admin<Record<string, unknown>[]>`
+      SELECT status, gateway_refund_id FROM refunds WHERE id = ${refundId}`;
+    expect(row!.status).toBe("processing");
+    expect(row!.gateway_refund_id).toBeNull();
+  });
 });

@@ -67,6 +67,9 @@ let checkoutVariant: string; // on_hand 5, reserved for the B-INT flows
 /** Webhook HMAC secret for tenant A's enabled mock account (B-INT rows). */
 const WEBHOOK_SECRET_A = "storefront-int-webhook-secret";
 
+/** Fixture tenant for the suspended-webhook case; cleaned in afterAll. */
+let suspendedTenant: string | null = null;
+
 type CartBody = {
   cart: {
     cartId: string;
@@ -93,9 +96,9 @@ type ErrorBody = {
 function req(
   host: string,
   path: string,
-  init: { method?: string; cookie?: string; json?: unknown } = {},
+  init: { method?: string; cookie?: string; json?: unknown; headers?: Record<string, string> } = {},
 ): Request {
-  const headers: Record<string, string> = { "x-forwarded-host": host };
+  const headers: Record<string, string> = { "x-forwarded-host": host, ...(init.headers ?? {}) };
   if (init.cookie) headers.cookie = init.cookie;
   if (init.json !== undefined) headers["content-type"] = "application/json";
   return new Request(`http://${host}${path}`, {
@@ -221,6 +224,7 @@ afterAll(async () => {
   if (!hadSessionSecret) delete process.env.SESSION_SECRET;
   if (savedMasterKey === undefined) delete process.env.CREDENTIALS_MASTER_KEY;
   else process.env.CREDENTIALS_MASTER_KEY = savedMasterKey;
+  if (suspendedTenant) await admin`DELETE FROM tenants WHERE id = ${suspendedTenant}`;
   await admin`DELETE FROM tenants WHERE id IN (${tenantA}, ${tenantB})`;
   await admin`DELETE FROM plans WHERE id = ${planId}`;
   await admin.end({ timeout: 5 });
@@ -714,5 +718,117 @@ describe("B-INT: POST /api/payments/webhook — capture, duplicate replay, settl
     expect(Number(payment!.fee_paise)).toBe(590);
     expect(Number(payment!.fee_tax_paise)).toBe(90);
     expect(payment!.gateway_payment_id).toBeTruthy();
+  });
+});
+
+describe("B-INT: POST /api/payments/webhook — suspended tenant still records evidence", () => {
+  it("verifies and stores a delivery for a suspended tenant while buyer routes stay 404", async () => {
+    // A webhook is the record-and-refund channel for money the gateway
+    // ALREADY captured — suspension must not drop capture evidence. The
+    // buyer doors, by contrast, must keep refusing.
+    const hostC = `b4-c-${run}.test`;
+    const slug = `b4c-${run}`;
+    const secret = "storefront-int-webhook-suspended";
+
+    const [tenant] = await admin<{ id: string }[]>`
+      INSERT INTO tenants (id, slug, legal_name, display_name, plan_id, status)
+      VALUES (${randomUUID()}, ${slug}, ${slug}, ${slug}, ${planId}, 'suspended')
+      RETURNING id`;
+    suspendedTenant = tenant!.id;
+    await admin`
+      INSERT INTO domains (id, tenant_id, hostname, is_primary, verified_at)
+      VALUES (${randomUUID()}, ${suspendedTenant}, ${hostC}, true, now())`;
+    const sealedCredentials = sealCredentials(
+      { keyId: "mock_pub_sus", keySecret: "mock_secret_sus" },
+      paymentCredentialsAad(suspendedTenant, "mock"),
+    );
+    const sealedWebhookSecret = sealCredentials(
+      { webhookSecret: secret },
+      paymentWebhookSecretAad(suspendedTenant, "mock"),
+    );
+    await admin`
+      INSERT INTO payment_accounts
+        (id, tenant_id, provider_code, label, public_key_id,
+         sealed_credentials, sealed_webhook_secret, credential_fingerprint, is_enabled)
+      VALUES (${randomUUID()}, ${suspendedTenant}, 'mock', 'Default', 'mock_pub_sus',
+              ${sealedCredentials}, ${sealedWebhookSecret},
+              ${credentialFingerprint(sealedCredentials)}, true)`;
+
+    // Buyer door: suspended reads as absent (unchanged behaviour).
+    const buyer = await cartGET(req(hostC, "/api/cart"));
+    expect(buyer.status).toBe(404);
+
+    // Webhook door: HMAC-verified, evidence row stored, 200 — even with
+    // no matching order (test events record with a null order id).
+    const eventId = "evt_mock_susp_" + randomUUID();
+    const { rawBody, signature } = mockWebhookBody(secret, {
+      type: "payment.captured",
+      eventId,
+      gatewayOrderId: "order_mock_suspended_none",
+      amountPaise: 49900,
+    });
+    const res = await webhookPOST(
+      webhookReq(hostC, rawBody, {
+        "x-razorpay-signature": signature,
+        "x-razorpay-event-id": eventId,
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    const evidence = await admin<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM payment_webhook_events
+      WHERE tenant_id = ${suspendedTenant} AND gateway_event_id = ${eventId}`;
+    expect(evidence[0]!.n).toBe(1);
+
+    // A bad signature on the suspended host is still a 401, nothing stored.
+    const badId = "evt_mock_susp_bad_" + randomUUID();
+    const bad = await webhookPOST(
+      webhookReq(hostC, rawBody, {
+        "x-razorpay-signature": "0".repeat(64),
+        "x-razorpay-event-id": badId,
+      }),
+    );
+    expect(bad.status).toBe(401);
+  });
+});
+
+describe("checkout rate limit (unauthenticated door)", () => {
+  it("the 6th rapid checkout-start from one client IP is a 429 with Retry-After", async () => {
+    // Unique per-run IP: the (tenant, ip) bucket must not inherit state
+    // from earlier runs inside the same 60s window.
+    const rand = () => Math.floor(Math.random() * 256);
+    const client = `10.${rand()}.${rand()}.${rand()}`;
+    // Two hops: the FIRST is the bucket key; the appended proxy hop must
+    // not split the bucket.
+    const xff = { "x-forwarded-for": `${client}, 198.51.100.7` };
+
+    // No cart cookie on purpose: the limiter sits BEFORE body/cookie/DB
+    // work, so these consume the bucket and fail cheaply as 404s.
+    const shoot = () =>
+      checkoutPOST(
+        req(HOST_A, "/api/checkout", { method: "POST", json: checkoutBody(), headers: xff }),
+      );
+
+    for (let i = 1; i <= 5; i += 1) {
+      const res = await shoot();
+      expect(res.status, `request ${i} of 5 must not be rate limited`).toBe(404);
+    }
+
+    const sixth = await shoot();
+    expect(sixth.status).toBe(429);
+    const body = (await sixth.json()) as ErrorBody;
+    expect(body.error.code).toBe("rate_limited");
+    expect(Number(sixth.headers.get("retry-after"))).toBeGreaterThanOrEqual(1);
+
+    // A different client IP against the same tenant is its own bucket —
+    // the limit throttles a client, not the store.
+    const other = await checkoutPOST(
+      req(HOST_A, "/api/checkout", {
+        method: "POST",
+        json: checkoutBody(),
+        headers: { "x-forwarded-for": `10.${rand()}.${rand()}.${rand()}` },
+      }),
+    );
+    expect(other.status).toBe(404);
   });
 });

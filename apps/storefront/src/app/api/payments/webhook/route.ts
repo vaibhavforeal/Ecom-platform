@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 
+import { resolveTenantByHost } from "@platform/core";
 import { confirmFromWebhookEvent } from "@platform/core/checkout/server";
 import {
   getEnabledAccount,
@@ -9,12 +10,7 @@ import {
 import { getPaymentAdapter } from "@platform/integrations/payments";
 import { and, eq, orders, withTenant } from "@platform/db";
 
-import {
-  errorResponse,
-  newRequestId,
-  resolveBuyerTenant,
-  tenantNotFound,
-} from "../../../../lib/buyer-api";
+import { errorResponse, newRequestId, tenantNotFound } from "../../../../lib/buyer-api";
 
 /**
  * The webhook door (spec §4.4). Order of operations is the contract:
@@ -79,7 +75,16 @@ function unauthorized(requestId: string, message: string): NextResponse {
 export async function POST(req: Request): Promise<NextResponse> {
   const requestId = newRequestId();
   try {
-    const tenant = await resolveBuyerTenant(req);
+    // Tenant from the Host — deliberately WITHOUT resolveBuyerTenant's
+    // suspended/churned filter. A webhook is not a new buyer
+    // transaction; it is the record-and-refund channel for money the
+    // gateway ALREADY captured (D15: webhooks are the source of truth,
+    // the raw payload must be stored). Refusing deliveries while a
+    // tenant is suspended would drop the capture-evidence row and the
+    // late-capture auto-refund path for exactly the orders most likely
+    // to be disputed. Buyer-facing routes keep the status filter.
+    const host = req.headers.get("x-forwarded-host") ?? req.headers.get("host");
+    const tenant = await resolveTenantByHost(host);
     if (!tenant) return tenantNotFound(requestId);
     const ctx = { tenantId: tenant.tenantId, requestId };
 

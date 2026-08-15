@@ -13,6 +13,7 @@ import { getOrderDetail, getOrderNumberPrefix } from "@platform/core/orders/serv
 import type { OrderDetailPayment } from "@platform/core/orders/server";
 
 import { requireActor } from "../../../lib/session";
+import { netSettlementPaise } from "../../../lib/settlement";
 import { OrderActions } from "./OrderActions";
 
 export const dynamic = "force-dynamic";
@@ -329,19 +330,25 @@ function Total({
   );
 }
 
-/** D17: gross − fee − fee GST = what the gateway settles to the merchant. */
+/**
+ * D17: net = gross − fee, what the gateway settles to the merchant.
+ * Razorpay's `fee` already INCLUDES its GST (`tax` is the component
+ * inside the fee, not an extra charge), so the GST renders as a
+ * parenthetical of the fee and is never subtracted a second time —
+ * see lib/settlement.ts.
+ */
 function NetSettlement({ payment, currency }: { payment: OrderDetailPayment; currency: string }) {
-  if (payment.status !== "captured" || payment.feePaise === null) {
+  const net = netSettlementPaise(payment);
+  if (net === null || payment.feePaise === null) {
     return <span className="muted">—</span>;
   }
-  const fee = payment.feePaise;
   const feeTax = payment.feeTaxPaise ?? 0;
-  const net = payment.amountPaise - fee - feeTax;
   return (
     <>
       {formatPaise(net, { currency })}
       <div className="muted">
-        − {formatPaise(fee, { currency })} fee − {formatPaise(feeTax, { currency })} GST
+        Fee {formatPaise(payment.feePaise, { currency })}
+        {feeTax > 0 && <> (incl. {formatPaise(feeTax, { currency })} GST)</>}
       </div>
     </>
   );

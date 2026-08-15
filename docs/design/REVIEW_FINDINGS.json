@@ -1,0 +1,184 @@
+{
+  "confirmed": [
+    {
+      "dimension": "tenancy",
+      "severity": "minor",
+      "title": "Webhook route rejects suspended/churned tenants, dropping capture evidence for money already moved",
+      "file": "apps/storefront/src/app/api/payments/webhook/route.ts",
+      "line": 82,
+      "claim": "POST /api/payments/webhook resolves the tenant via resolveBuyerTenant, which maps suspended and churned tenants to a 404 before signature verification, so gateway webhooks for in-flight payments are refused and no evidence row (payment_webhook_events) is ever stored — the 'suspended must not keep transacting' rule was written for buyer transactions (buyer-api.ts line 37 comment), but a webhook is not a new transaction, it is the only record-and-refund path for money the gateway already captured (D15: webhooks are the source of truth; raw payload must be stored).",
+      "scenario": "Buyer completes a Razorpay payment on tenant A's store; moments later the platform suspends tenant A (billing/fraud). Every payment.captured delivery now gets 404 'Store not found'; the gateway retries for ~24h then gives up. If the suspension outlasts the retry window (or the tenant is churned), the pending_payment order is swept to abandoned by the worker, the late-capture auto-refund path (processCaptured's late_capture branch) never runs because the event never reaches confirmFromWebhookEvent, and the platform holds zero record — no webhook evidence row, no refund intent — of a capture the buyer will dispute and an auditor will ask about.",
+      "refuterNotes": [
+        "Confirmed, not refuted. The webhook route (apps/storefront/src/app/api/payments/webhook/route.ts:82-83) calls resolveBuyerTenant, which maps suspended/churned tenants to null (buyer-api.ts:37) and returns 404 before HMAC verification (line 107) and before recordWebhookEvent (line 136) — so no payment_webhook_events evidence row is ever stored. No guard exists elsewhere: resolveTenantByHost deliberately returns suspended tenants (\"Handled at the call site\", core/src/tenancy/resolve.ts:82); there is no storefront middleware; confirmFromWebhookEvent's only production caller is this route; and no ",
+        "Claim verified against the code; could not refute. (1) apps/storefront/src/app/api/payments/webhook/route.ts:82-83 returns 404 via resolveBuyerTenant BEFORE body read, HMAC verify, and recordWebhookEvent — so no payment_webhook_events evidence row is ever written for suspended/churned tenants. (2) buyer-api.ts:37 is the ONLY status gate: packages/core/src/tenancy/resolve.ts deliberately returns suspended tenants (comment says status handling is a call-site decision meant for a friendly storefront page), so no lower-level guard exists. (3) No recovery path: confirmFromWebhookEvent's only produc"
+      ]
+    },
+    {
+      "dimension": "money-tax",
+      "severity": "major",
+      "title": "Net settlement double-subtracts fee GST (Razorpay fee already includes tax)",
+      "file": "apps/console/src/app/orders/[id]/page.tsx",
+      "line": 339,
+      "claim": "NetSettlement computes net = amountPaise - feePaise - feeTaxPaise, but Razorpay's payment entity `fee` field is the fee INCLUDING GST and `tax` is the GST component already inside `fee`, so the console understates net settlement by the fee GST on every captured razorpay payment.",
+      "scenario": "Buyer pays Rs 1000 via a tenant's Razorpay account; webhook reports fee=2360 paise (Rs 20 fee + Rs 3.60 GST) and tax=360 paise. Razorpay actually settles Rs 976.40 (1000 - 23.60), but the console order detail renders net settlement as Rs 972.80 (1000 - 23.60 - 3.60). Every payment disagrees with the merchant's bank settlement by the GST amount, breaking reconciliation. (D17's wording 'gross - fee - fee GST' encodes the same misreading of Razorpay's field semantics; correct is gross - fee.)",
+      "refuterNotes": [
+        "CONFIRMED, not refuted. Razorpay's official payment-entity docs (and the razorpay npm SDK types) define `fee` as \"Fee (including GST) charged by Razorpay\" and `tax` as the GST component already inside fee — doc examples prove it (fee=236/tax=36 on 10000 paise = 200 base + 36 GST; fee=118/tax=18 on 5000 paise). Actual settlement = amount − fee. The repo passes both fields raw with no normalization anywhere: razorpay.ts:173-174 (adapter), packages/core/src/payments/server.ts:455-456 (persistence), and apps/console/src/app/orders/[id]/page.tsx:339 computes net = amountPaise − fee − feeTax, double",
+        "CONFIRMED, could not refute. Razorpay's official payment-entity docs (razorpay.com/docs/api/payments/entity) define `fee` as \"Fee (including GST) charged by Razorpay\" and `tax` as the GST component — tax lives INSIDE fee. The adapter (packages/integrations/src/payments/razorpay.ts:173-174) maps payment.fee→feePaise and payment.tax→feeTaxPaise raw with no transformation; core stores them raw (packages/core/src/payments/server.ts:455-456); the console (apps/console/src/app/orders/[id]/page.tsx:339) computes net = amountPaise - fee - feeTax, subtracting the GST twice, while its own comment (line "
+      ]
+    },
+    {
+      "dimension": "money-tax",
+      "severity": "major",
+      "title": "GST-regular tenant with NULL origin_state_code silently taxes every sale as inter-state IGST",
+      "file": "packages/core/src/checkout/server.ts",
+      "line": 960,
+      "claim": "createOrderTx passes `sellerStateCode: seller.originStateCode ?? \"\"` into computeLineTaxes instead of refusing when a regular-registered tenant has no origin state, so the intra-state check ('' === buyer state) is always false and every order — including same-state buyers — gets IGST instead of the CGST/SGST split; the invoice seller block (line 1454) also freezes stateCode: \"\".",
+      "scenario": "tenants row has tax_registration_type='regular' and gstin set but origin_state_code NULL (column is nullable with no CHECK, and no console/onboarding surface in this branch enforces it). A Karnataka buyer orders from the Karnataka seller: checkout writes igst_paise for every line and issues a Tax Invoice with IGST and an empty seller state code — an invalid document and wrong GSTR-1 classification for every single order, with no error anywhere.",
+      "refuterNotes": [
+        "Claim confirmed, not refuted. server.ts:960 passes `sellerStateCode: seller.originStateCode ?? \"\"` and tax/index.ts:117-152 computes intraState by plain string equality with no context validation; buyer stateCode is zod-enforced /^[0-9]{2}$/ so \"\" never matches, making every taxed line IGST for a regular tenant with NULL origin_state_code, and server.ts:1454 freezes stateCode \"\" into the invoice seller snapshot. No guard exists anywhere: loadSellerIdentity does no validation, no refusal on the checkout path, origin_state_code is nullable with no CHECK (tenancy.ts:66), and the console only disp",
+        "CONFIRMED, not refuted. The failure logic reproduces end-to-end from the code: (1) tenants.origin_state_code is nullable with no CHECK (packages/db/src/schema/tenancy.ts:66; all drizzle snapshots notNull:false); (2) createOrderTx passes sellerStateCode: seller.originStateCode ?? \"\" (packages/core/src/checkout/server.ts:960) and the full refuse-code inventory in server.ts contains no tax-config guard; (3) computeLineTaxes (packages/core/src/tax/index.ts:117-152) validates only line amounts/rates — for a 'regular' tenant, intraState = \"\" === \"29\" is false, so the else branch assigns the full tax"
+      ]
+    },
+    {
+      "dimension": "money-tax",
+      "severity": "minor",
+      "title": "Promotion form parses rupee amounts through floats and silently rounds >2-decimal input",
+      "file": "apps/console/src/app/promotions/form-model.ts",
+      "line": 200,
+      "claim": "parseRupees uses `Math.round(Number(value) * 100)` — the exact float shortcut packages/core/src/catalog/money.ts exists to forbid — instead of parseAmountToPaise, so amounts with more than two decimals are silently rounded to a value the merchant did not type rather than rejected.",
+      "scenario": "Merchant creates a flat_off coupon and types 99.999 (or pastes a spreadsheet value like 1299.995): the form stores 10000 paise (Rs 100.00) / 130000 paise with no warning, and the stored discount differs from what was entered; the repo's canonical parser would refuse with 'a rupee amount has at most 2 decimal places'. Scientific-notation strings like '1e5' are also accepted as Rs 100000.",
+      "refuterNotes": [
+        "Claim confirmed against the code. parseRupees (apps/console/src/app/promotions/form-model.ts:194-203) is exactly `Math.round(Number(value) * 100)` with only empty/non-finite/below-min checks: \"99.999\" silently becomes 10000 paise (Rs 100.00), \"1299.995\" becomes 130000 paise, and \"1e5\" is accepted as Rs 100,000 — all values parseAmountToPaise (packages/core/src/catalog/money.ts) would reject (\"a rupee amount has at most 2 decimal places\" / \"not a plain number\"), per its doc comment that explicitly forbids this float shortcut. No guard exists elsewhere: the form inputs are plain text with inputM",
+        "Claim confirmed by direct code reading and execution. parseRupees (apps/console/src/app/promotions/form-model.ts:194-203) converts via Number()*100 + Math.round — the exact float shortcut packages/core/src/catalog/money.ts's header (lines 9-14) names as forbidden — and pushes no issue for >2-decimal input. Reproduced: \"99.999\" → 10000 paise (₹100.00) stored silently; \"1e5\" → 10,000,000 paise accepted; parseAmountToPaise would reject both (\"at most 2 decimal places\" / \"not a plain number\"). No guard elsewhere: the form inputs are plain text (inputMode=\"decimal\", no step validation); the server "
+      ]
+    },
+    {
+      "dimension": "money-tax",
+      "severity": "minor",
+      "title": "cod_advance split can produce a 0–99 paise advance the gateway refuses, bricking the cart until expiry",
+      "file": "packages/core/src/payments/index.ts",
+      "line": 154,
+      "claim": "computeAdvanceSplit clamps the advance only to [minAdvancePaise, total] with no Rs 1 gateway floor, so a small advanceBps with minAdvancePaise=0 yields an advance of 0–99 paise; startGatewayPayment then calls createGatewayOrder with an amount Razorpay rejects (minimum 100 paise) — after TX-A has already created the order, converted the cart, and taken the hold.",
+      "scenario": "Store sets payments.advance_bps=100 (1%) and min_advance_paise=0. Buyer checks out a Rs 50 cart with cod_advance: advance = 50 paise. Order + hold are created, then Razorpay returns 400 on the 50-paise order and checkout 502s; the replay with the same idempotency key repeats the same 502, and a fresh key hits the pending-cart belt (409). The buyer's cart is stuck 'converted' behind a pending order for ~25 minutes until expiry sweeps it. (advance=0 on totals ≤ Rs 0.04 fails one step later at insertPayment's amount>0 refusal with the same stranded-order effect.)",
+      "refuterNotes": [
+        "Claim confirmed from code. computeAdvanceSplit (packages/core/src/payments/index.ts:153-154) clamps the advance only to [minAdvancePaise, totalPaise] — no 100-paise gateway floor — and readCheckoutSettings (checkout/server.ts:346-347) accepts advance_bps=100 with min_advance_paise defaulting to 0, so a Rs 50 cart yields a 50-paise advance exactly as claimed (the unit test at payments-adapters.test.ts:383-385 even pins a 3-paise advance as correct). startCheckout commits TX-A (order pending_payment, cart converted), takes holds (TX-B), enqueues expiry, then startGatewayPayment passes the raw ad",
+        "Claim CONFIRMED from code. computeAdvanceSplit (packages/core/src/payments/index.ts:153-154) clamps the advance only to [minAdvancePaise, totalPaise] with no 100-paise gateway floor, and its own unit test pins advancePaise=3 paise as valid output (tests/payments-adapters.test.ts:384-385). readCheckoutSettings defaults min_advance_paise to 0 (checkout/server.ts:347) and no writer validates the keys anywhere in the repo. startCheckout skips the gateway only for mode 'cod' or totalPaise===0 (server.ts:713), so a Rs 50 cod_advance cart at 1% sends amountPaise=50 to createGatewayOrder AFTER TX-A co"
+      ]
+    },
+    {
+      "dimension": "concurrency",
+      "severity": "critical",
+      "title": "Captured payment stranded when concurrent replays mint two Razorpay orders (last-write-wins gatewayOrderRef)",
+      "file": "packages/core/src/checkout/server.ts",
+      "line": 1694,
+      "claim": "processCaptured resolves the order solely via orders.gatewayOrderRef, but startGatewayPayment can run concurrently for the same order (winner path at line 722 and replayCheckout at line 1339 both fire while gatewayOrderRef is still NULL) with no lock or WHERE-null guard on the UPDATE at line 1210-1217, so with Razorpay — whose Orders API does NOT dedupe on receipt — two distinct gateway orders get created and gatewayOrderRef keeps only the last writer; a capture webhook for the superseded gateway order id matches no order and is silently acknowledged as 'ignored'.",
+      "scenario": "Buyer double-submits checkout (same idempotency key). R1 wins createOrderTx and enters the slow Razorpay createGatewayOrder call; R2 replays, sees gatewayOrderRef NULL, creates a second Razorpay order B, writes gatewayOrderRef=B; R1 returns and overwrites gatewayOrderRef=A. Buyer's client pays gateway order B. payment.captured(B) arrives -> SELECT ... WHERE gatewayOrderRef = B finds nothing (ref is A) -> {kind:'ignored'} -> 200 OK. Money is captured at the gateway but never recorded; the order expires to abandoned; even the D9 late-capture auto-refund never fires because it uses the same gatewayOrderRef lookup. Buyer is charged with no order and no refund. The mock adapter hashes the receipt so both requests get the SAME id — every test (including 'concurrent same-key replays keep ONE hold set') passes only because of the mock's dedupe; the fix is to fall back to resolving the order via payments.gatewayOrderId (the payments row for B exists with the right orderId).",
+      "refuterNotes": [
+        "Claim CONFIRMED after adversarial verification. (1) The race is reachable: startCheckout calls startGatewayPayment at server.ts:722 while a concurrent same-key replay reaches replayCheckout, whose gatewayOrderRef-NULL check at line 1337 reads a stale unlocked order row (fast-path SELECT ~line 595) and calls startGatewayPayment again at line 1339 — the window spans from TX-A commit to TX-D commit, with nothing serializing the two (withTenant is just an RLS tx wrapper; the adapter call runs outside any tx). (2) TX-D at lines 1210-1217 updates orders.gatewayOrderRef unconditionally — no WHERE-nul",
+        "CONFIRMED, not refuted. Every load-bearing element of the claim reproduces from the code: (1) processCaptured (packages/core/src/checkout/server.ts:1690-1697) resolves orders solely by orders.gatewayOrderRef and returns {kind:'ignored'} → 200 on a miss; the webhook route (apps/storefront/src/app/api/payments/webhook/route.ts:126) uses the same single lookup, and no fallback via payments.gatewayOrderId exists anywhere. (2) Concurrent startGatewayPayment is reachable: the winner path (server.ts:722) and replayCheckout (server.ts:1337-1339, testing gatewayOrderRef on a STALE OrderRow snapshot fro"
+      ]
+    },
+    {
+      "dimension": "concurrency",
+      "severity": "major",
+      "title": "Gateway refund call is not idempotent at Razorpay: a crash between adapter.refund and markRefundProcessing permanently orphans the refund",
+      "file": "apps/worker/src/jobs/gateway-refund.ts",
+      "line": 44,
+      "claim": "processGatewayRefund calls adapter.refund BEFORE persisting any marker; the comment claims 'the adapter idempotency key (= refundId) make a replayed job safe at both ends' but the razorpay adapter only passes it as `receipt` (razorpay.ts:216), a non-deduping reference field — Razorpay's refund API has no idempotency on receipt — so an at-least-once retry after a successful gateway call but before markRefundProcessing re-issues the refund; Razorpay refuses the second full refund (nothing left refundable) with a 4xx, the job dead-letters, and the refund row is stuck 'pending' with gatewayRefundId NULL forever.",
+      "scenario": "Worker executes adapter.refund -> Razorpay creates refund rfnd_X and returns -> process crashes (or SIGKILL, or Redis blip) before markRefundProcessing commits. BullMQ retries: refund.status is still 'pending', adapter.refund fires again, Razorpay rejects ('refund amount greater than the payment amount refundable') -> gateway_error thrown -> 5 attempts exhaust -> dead letter. The later refund.processed webhook for rfnd_X cannot match (markRefundProcessed matches refunds.gatewayRefundId, which was never stored) and no-ops, so orders.paymentStatus stays 'refund_initiated' forever while the buyer's money was actually returned — merchant and auditor see a stuck refund with no gateway reference. On any future gateway allowing partial/duplicate refunds this same window is a double money movement. Fix: persist gatewayRefundId (or a 'dispatching' marker) before/atomically with the outbound call, or reconcile by amount+payment on the processed webhook.",
+      "refuterNotes": [
+        "NOT REFUTED — the core defect reproduces concretely from the code, though one mechanism detail in the claim is wrong. Verified chain: (1) apps/worker/src/jobs/gateway-refund.ts:44-52 calls adapter.refund BEFORE persisting anything; markRefundProcessing is a separate post-call transaction, so a crash/SIGKILL — or merely the 10s AbortSignal.timeout in razorpayPost firing after Razorpay created the refund — leaves refund.status='pending' with gatewayRefundId NULL. (2) BullMQ retries (packages/core/src/queues.ts: attempts 5, exponential backoff, removeOnFail:false); the 'pending' gate at gateway-r",
+        "NOT REFUTED — the core defect reproduces concretely from the code, with one factual correction to the claim's gateway-side premise. Confirmed chain: (1) apps/worker/src/jobs/gateway-refund.ts:44-52 calls adapter.refund BEFORE markRefundProcessing, and the only replay guard is refund.status !== 'pending', which is still 'pending' if the process crashes or the DB write fails after a successful gateway call — so the retry re-issues the gateway request. (2) packages/integrations/src/payments/razorpay.ts:212-219 sends the key only as `receipt` with no X-Refund-Idempotency header; razorpayPost throw"
+      ]
+    },
+    {
+      "dimension": "concurrency",
+      "severity": "minor",
+      "title": "Lock-order inversion between customers and promotions rows: checkout-start (customer→promotion) vs webhook confirm (promotion→customer) can deadlock",
+      "file": "packages/core/src/checkout/server.ts",
+      "line": 1488,
+      "claim": "createOrderTx locks the customer row first (upsertCustomerByPhone's ON CONFLICT DO UPDATE at line 802) and then the promotion row (loadActivePromotionForUpdate at line 821), while confirmOrderCore locks the promotion row (loadPromotionById/claimRedemption FOR UPDATE) and then updates the same customer row (markFirstOrder at line 1488, which takes the row lock whenever first_order_at IS NULL) — an inverted lock order across the two transactions.",
+      "scenario": "First-time customer's payment.captured webhook is confirming order 1 (holds the promotion lock inside claimRedemption, about to run markFirstOrder) while the same buyer starts a second checkout with the same coupon (holds their customer row lock from the upsert, blocking on the promotion FOR UPDATE). Postgres detects the cycle after deadlock_timeout and aborts one transaction: either the buyer's checkout 500s (40P01 surfaces as an unmapped error) or the webhook confirm 5xxes and rides redelivery. Self-healing but a real production deadlock under exactly the load the coupon-cap FOR UPDATE serialization invites; moving markFirstOrder before the coupon claim (or upserting the customer after the promotion lock) restores a single global order.",
+      "refuterNotes": [
+        "Claim confirmed, not refuted. The lock-order inversion is real and reproducible from the code: createOrderTx locks the customer row first (upsertCustomerByPhone at packages/core/src/checkout/server.ts:802 — ON CONFLICT DO UPDATE always updates and row-locks the existing row for a returning phone, customers/server.ts:57-68) then the promotion row (loadActivePromotionForUpdate FOR UPDATE at line 821); confirmOrderCore locks the promotion row (line 1402 via loadPromotionById FOR UPDATE at 1510-1515, re-locked in claimRedemption) and only afterwards updates the customer row (markFirstOrder at line",
+        "CONFIRMED — the lock-order inversion is real and reachable. Checkout-start (createOrderTx, packages/core/src/checkout/server.ts:747-821) locks customer then promotion: upsertCustomerByPhone at line 802 uses INSERT…ON CONFLICT DO UPDATE (customers/server.ts:57-68) whose DO UPDATE branch always fires for an existing phone (SET includes updatedAt:now()), holding the customer tuple lock until commit; loadActivePromotionForUpdate at line 821 then takes FOR UPDATE on the promotion row. Webhook confirm (processCaptured → confirmOrderCore) runs in a fresh withTenant tx that never touches the customers"
+      ]
+    },
+    {
+      "dimension": "concurrency",
+      "severity": "minor",
+      "title": "replayCheckout acts on an unlocked status read: a replay racing the webhook confirm re-inserts holds on a confirmed order and updates expires_at without a status guard",
+      "file": "packages/core/src/checkout/server.ts",
+      "line": 1281,
+      "claim": "replayCheckout reads the order without FOR UPDATE (the fast-path SELECT at line 595-602) and then calls holdStock and an unconditional expires_at UPDATE (lines 1298-1303 have no status filter); if confirmFromWebhookEvent commits between the read and the holdStock, the replay recreates checkout holds that consumeStockWithin just deleted, double-counting the sold units (on_hand already decremented AND reserved) for the full 15-minute reservation TTL with nothing ever releasing them.",
+      "scenario": "Buyer's client retries the checkout POST (same idempotency key, e.g. after a network timeout) at the moment the payment.captured webhook confirms the order. Replay sees status=pending_payment, webhook confirm commits (sale movements written, hold rows deleted, expires_at cleared), then replay's holdStock re-inserts the hold rows for reference checkout:{orderId} and the UPDATE re-populates expires_at on the confirmed order. For the next 15 minutes the PDP and other checkouts see availability reduced twice (last units show sold out, holdStock refuses other buyers, merchant negative adjustments refuse with stock_held); no release path runs because expireCheckout returns already_final without releasing and the daily GC is the only cleaner. Locking the order row (or re-checking status inside a guarded UPDATE ... WHERE status='pending_payment') in the replay path closes it.",
+      "refuterNotes": [
+        "Claim confirmed, not refuted. The failure logic reproduces concretely from the code: (1) the idempotency fast path (packages/core/src/checkout/server.ts:595-602) reads the order with a plain SELECT in its own committed tx and replayCheckout's status gate (line 1275) tests that stale row — the replay path never takes the order row lock that the webhook confirm uses, so nothing serializes them; (2) between that read and holdStock (line 1283) sit multiple separate-tx round-trips (loadOrderLines, fingerprint), an ample window for processCaptured's TX-2 to commit — consumeStockWithin deletes the ch",
+        "Claim CONFIRMED, could not refute. Every load-bearing assertion checks out in the code: (1) the idempotency fast path (packages/core/src/checkout/server.ts:595-602) reads the order without FOR UPDATE and replayCheckout branches on that stale status at line 1275; (2) holdStock (packages/core/src/inventory/server.ts:782) runs in its own transaction with no order-status knowledge — after a webhook confirm commits (consumeStockWithin deletes the hold rows, writes sale movements decrementing on_hand, transitionOrder sets status=confirmed and expiresAt=null per orders/server.ts:107), a racing replay"
+      ]
+    },
+    {
+      "dimension": "concurrency",
+      "severity": "minor",
+      "title": "Cart line upsert is not serialized against the checkout snapshot: a line added mid-TX-A is silently dropped from the order",
+      "file": "packages/core/src/cart/server.ts",
+      "line": 233,
+      "claim": "upsertLine checks cart status with a plain SELECT (loadActiveCart) and inserts into cart_lines before its carts UPDATE (touchCart) blocks on the row lock, while createOrderTx takes the cart FOR UPDATE and snapshots the lines — so a concurrent add-to-cart can pass the active-status check and land its cart_lines insert AFTER checkout's line snapshot but BEFORE TX-A commits, producing an order that omits the line while the cart is marked converted.",
+      "scenario": "Buyer with two tabs (or a slow double-tap on mobile) hits 'add to cart' and 'place order' near-simultaneously. Checkout TX-A locks the cart, reads 2 lines, inserts the order, converts the cart; the racing upsertLine (status check passed pre-conversion) inserts line 3 and then its touchCart waits on the cart lock, proceeding after commit with no status re-check. Result: order confirmed with 2 items, the buyer believes 3 were ordered, and the phantom line sits on a converted cart (resurfacing confusingly if the order later cancels and the cart reverts to active). Taking the cart row FOR UPDATE (or re-verifying status='active' in the cart_lines write's WHERE) in upsertLine/removeLine closes the window.",
+      "refuterNotes": [
+        "Claim CONFIRMED, not refuted. (1) upsertLine's loadActiveCart (packages/core/src/cart/server.ts:57-66) is a plain SELECT with no FOR UPDATE; the cart_lines write (233-244) and touchCart (68-73) carry no status='active' predicate. (2) createOrderTx (packages/core/src/checkout/server.ts:750-755, 770-797, 1104-1107) locks the cart FOR UPDATE, snapshots lines, and converts in one tx. (3) withTenant (packages/db/src/tenant-scope.ts:53) opens a bare transaction — READ COMMITTED, no isolation override anywhere in the repo — so TX-B's writes that block on TX-A's row lock resume after commit and succee",
+        "CONFIRMED. The race is real and reproducible from the code. (1) Transactions run at Postgres default READ COMMITTED — withTenant (packages/db/src/tenant-scope.ts:53) and client.ts set no isolation level. (2) upsertLine (packages/core/src/cart/server.ts) checks cart status via a plain SELECT (loadActiveCart, lines 57-66, no FOR UPDATE), inserts cart_lines at line 233 (conflicts with nothing checkout holds), and only then hits touchCart (line 246) whose UPDATE carts has WHERE tenant_id+id only — after blocking on TX-A's cart row lock it proceeds via EvalPlanQual with no status re-check. (3) crea"
+      ]
+    },
+    {
+      "dimension": "security",
+      "severity": "major",
+      "title": "Unauthenticated checkout has no rate limiting: COD order flooding and inventory denial",
+      "file": "apps/storefront/src/app/api/checkout/route.ts",
+      "line": 38,
+      "claim": "POST /api/cart and POST /api/checkout are fully unauthenticated with no rate limit, captcha, or per-phone/IP throttle anywhere (no storefront middleware, no limiter in buyer-api.ts, no Caddy rate_limit directive, and rate limiting appears nowhere in PHASE2_COMMERCE_DESIGN.md), and paymentMode=cod confirms an order synchronously via confirmCodOrder — committing stock movements and allocating a sequential GST invoice number per fake order.",
+      "scenario": "A script loops: POST /api/cart with no cookie (mints a fresh cart), add a line, POST /api/checkout with a fresh idempotencyKey, any valid E.164 phone (+911234567890), a serviceable pincode, paymentMode=cod. Each iteration instantly creates a CONFIRMED order: stock is decremented (the merchant's catalog shows sold out to real buyers), a sequential invoice number is irrevocably consumed (auditor-visible gaps/noise in the GST document series after mass-cancel), and customer/order rows flood the console. The one-pending-order-per-cart index doesn't help because carts are free to mint and COD skips pending_payment entirely; with prepaid mode the same loop holds all stock for 25-minute windows on repeat, permanently starving legitimate checkouts. Merchant must hand-cancel every fake order to restock.",
+      "refuterNotes": [
+        "Could not refute; every element of the claim reproduces from the code. (1) No guard exists anywhere: apps/storefront/src/app/api/checkout/route.ts and api/cart/route.ts are unauthenticated (buyer-api.ts documents \"NO session actor\"), there is no storefront middleware.ts, infra/caddy/Caddyfile has no rate_limit directive, and the repo's only rate limiter (packages/core/src/identity/rate-limit.ts) is wired solely into console OTP auth — zero consumeRateLimit references in the checkout/cart/buyer paths. (2) The scenario is concretely executable: startCheckout (packages/core/src/checkout/server.ts",
+        "The claim survives adversarial verification; the failure logic reproduces concretely from the code. (1) No guard exists anywhere: the repo's only rate limiter (packages/core/src/identity/rate-limit.ts) is wired solely into console OTP auth (identity/auth.ts); apps/storefront has no middleware.ts; buyer-api.ts documents the buyer routes as having \"NO session actor (spec §7)\"; infra/caddy/Caddyfile has no rate_limit directive on storefront vhosts. (2) The loop works as described: getOrCreateCart (packages/core/src/cart/server.ts:80) mints an uncapped fresh cart per cookieless POST /api/cart; the"
+      ]
+    },
+    {
+      "dimension": "spec-conformance",
+      "severity": "minor",
+      "title": "payment.failed / payment.amount_mismatch / payment.late_captured events never enqueued to the orders queue",
+      "file": "packages/core/src/checkout/server.ts",
+      "line": 1956,
+      "claim": "Spec §5.2 catalogs payment.failed, payment.amount_mismatch and payment.late_captured as queue-emitted domain events (emission always after the writing tx, consumer = worker log seam), but the webhook handlers insert their order_events rows and discard the descriptors — processFailed enqueues nothing, and processCaptured's post-commit block enqueues only for the 'confirmed' and 'late_capture' (refund job only) outcomes.",
+      "scenario": "A gateway delivers payment.failed for a pending order (or a capture with a mismatched amount): the order_events row is written, but no job with jobId=order_events.id ever reaches the orders queue, so the worker log seam — and any Phase 3/4 consumer (buyer messaging on payment failure, merchant alerting on amount mismatch) wired to the §5.2 catalog — silently never sees these three event types, while every other cataloged event arrives.",
+      "refuterNotes": [
+        "Claim confirmed, not refuted. In packages/core/src/checkout/server.ts: insertOrderEvent (251-281) only inserts the order_events row and returns a descriptor; processFailed (1933-1960) discards the payment.failed descriptor at line 1956 and has no post-commit enqueue; processCaptured's post-commit block (1783-1795) enqueues order events only for kind 'confirmed' and only the refund job for 'late_capture', so the payment.amount_mismatch (1713) and payment.late_captured (1741) descriptors are dropped. No guard elsewhere: the webhook route (apps/storefront/src/app/api/payments/webhook/route.ts:146",
+        "Claim confirmed, not refuted. Spec §5.2 (docs/design/PHASE2_COMMERCE_DESIGN.md) catalogs payment.failed, payment.amount_mismatch, and payment.late_captured as orders-queue domain events (jobId = order_events.id, consumer = worker order-events log seam, emission after the writing tx). In packages/core/src/checkout/server.ts: processFailed (line 1956) inserts the payment.failed order_events row but discards the descriptor and has no post-commit code (the line-1983 enqueue is processRefundProcessed's order.refunded); processCaptured discards the descriptors at lines 1713 (amount_mismatch) and 174"
+      ]
+    },
+    {
+      "dimension": "spec-conformance",
+      "severity": "minor",
+      "title": "Zero-total prepaid checkout refused on a store with no enabled gateway, contra §4.2.6",
+      "file": "packages/core/src/checkout/server.ts",
+      "line": 627,
+      "claim": "Spec §4.2.6 says a zero-total order (100% discount) 'confirms through the same door, no gateway', but startCheckout requires an enabled payment account for any non-cod mode before TX-A — before the total is known — so a zero-total prepaid checkout on a gateway-less store gets 422 payments_not_configured; the deviation is recorded only in a code comment, not in any commit/lot deviation record.",
+      "scenario": "A merchant with no payment gateway configured (COD-only store) runs a 100%-off coupon; a buyer applies it and submits checkout with paymentMode 'prepaid' — instead of the spec-mandated free confirmed order, they are refused with 'Online payment is not available on this store yet' and can only complete by switching to COD.",
+      "refuterNotes": [
+        "The claim is confirmed, not refuted. (1) Mechanics: packages/core/src/checkout/server.ts:625-636 requires getEnabledAccount for any non-cod mode and throws 422 payments_not_configured (\"Online payment is not available on this store yet.\") BEFORE createOrderTx (line 643) computes the total, so a 100%-off prepaid checkout on a gateway-less store never reaches the zero-total confirm branch at line 713 — the code's own comment (lines 620-623) admits this exact consequence. (2) Spec: PHASE2_COMMERCE_DESIGN.md §4.2 step 1 lists only cod/cod_advance config refusals pre-TX; the account is touched only",
+        "Claim confirmed, not refuted. packages/core/src/checkout/server.ts requires an enabled payment account for any non-cod mode BEFORE TX-A (check at ~lines 621-637, refuse 422 payments_not_configured at line 629), before the total is computed; the zero-total confirm branch (line 713) is unreachable on a gateway-less store. The in-code comment at ~line 622 explicitly admits this exact consequence. Spec §4.2 step 1 lists only COD/advance config refusals pre-TX-A (no gateway precondition), and §4.2.6 (PHASE2_COMMERCE_DESIGN.md:672-674, checklist line 998) mandates zero-total orders confirm through t"
+      ]
+    }
+  ],
+  "contested": [
+    {
+      "dimension": "spec-conformance",
+      "severity": "minor",
+      "title": "shipping.pincode_policy mode 'carrier' throws not_supported_yet instead of the §1.10/D13 cache-first registry check",
+      "file": "packages/core/src/serviceability/server.ts",
+      "line": 104,
+      "claim": "Spec §1.10 and D13 mandate that 'carrier' mode 'consults the existing serviceability_cache via the carrier registry, cache-first', but checkServiceability throws a 422 not_supported_yet AppError for that mode — a scope-narrowing recorded only in a code comment ('per the B4 task'), absent from the commit-message deviation records.",
+      "scenario": "A merchant (or support engineer following the design doc) sets store_settings shipping.pincode_policy to {\"mode\":\"carrier\"} expecting cache-first carrier serviceability: every buyer's serviceability precheck and every checkout POST on that store then fails 422 'Carrier-based delivery checks are not available yet', bricking checkout store-wide until the setting is reverted."
+    }
+  ]
+}

@@ -4,6 +4,8 @@ import { clearCartCoupon, setCartCoupon } from "@platform/core/cart/server";
 import { z } from "zod";
 
 import {
+  CART_MUTATION_LIMIT,
+  enforceBuyerRateLimit,
   errorResponse,
   newRequestId,
   parseBuyerBody,
@@ -40,6 +42,9 @@ export async function POST(req: Request): Promise<NextResponse> {
     const tenant = await resolveBuyerTenant(req);
     if (!tenant) return tenantNotFound(requestId);
 
+    // Cart-mutation limit (see buyer-api.ts) — same bucket as line upserts.
+    await enforceBuyerRateLimit(req, tenant.tenantId, CART_MUTATION_LIMIT);
+
     const cartId = readCartIdFrom(req);
     if (!cartId) return noCart(requestId);
 
@@ -62,6 +67,8 @@ export async function DELETE(req: Request): Promise<NextResponse> {
   try {
     const tenant = await resolveBuyerTenant(req);
     if (!tenant) return tenantNotFound(requestId);
+
+    await enforceBuyerRateLimit(req, tenant.tenantId, CART_MUTATION_LIMIT);
 
     const cartId = readCartIdFrom(req);
     if (!cartId) return noCart(requestId);

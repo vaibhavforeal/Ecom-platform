@@ -7,6 +7,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { closeConnections, withTenant } from "@platform/db";
 import { closeRedis, sealCredentials, credentialFingerprint } from "@platform/core";
+import { upsertLine } from "@platform/core/cart/server";
 import {
   confirmFromWebhookEvent,
   setGatewayAdapterResolver,
@@ -175,6 +176,18 @@ async function deliver(event: GatewayEvent): Promise<void> {
     rawPayload: {},
   });
   await confirmFromWebhookEvent(ctx(), { webhookEventId, event });
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitFor(cond: () => boolean, timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!cond()) {
+    if (Date.now() > deadline) throw new Error("waitFor timed out");
+    await sleep(25);
+  }
 }
 
 beforeAll(async () => {
@@ -596,5 +609,197 @@ describe("confirm-time races", () => {
       SELECT count(*)::int AS n FROM orders
       WHERE tenant_id = ${tenantA} AND idempotency_key = ${p.idempotencyKey}`;
     expect(orderRows[0]!.n).toBe(1);
+  });
+});
+
+describe("replay and lock-order races (review fixes)", () => {
+  it("concurrent replays during payment-start surface ONE gateway order ref — a capture can never be stranded", async () => {
+    const variant = await makeVariant();
+    await seed(variant, 5);
+    const cartId = await makeCart([{ variantId: variant, quantity: 1 }]);
+    const p = payload();
+
+    // A Razorpay-shaped adapter: a UNIQUE gateway order per call (no
+    // receipt dedupe — the mock's dedupe is what used to hide this bug),
+    // with each call parked on a gate this test controls.
+    let mints = 0;
+    const gates: Array<() => void> = [];
+    const gatedAdapter: PaymentGatewayAdapter = {
+      provider: "mock",
+      async createGatewayOrder() {
+        mints += 1;
+        const seq = mints;
+        await new Promise<void>((resolve) => gates.push(resolve));
+        return { gatewayOrderId: `order_race_${seq}_${randomUUID().slice(0, 8)}` };
+      },
+      verifyWebhook: () => true,
+      parseWebhook: () => {
+        throw new Error("unused");
+      },
+      async refund() {
+        return { gatewayRefundId: "rfnd_unused" };
+      },
+    };
+    setGatewayAdapterResolver(() => gatedAdapter);
+    try {
+      const winner = startCheckout(ctx(), cartId, p); // parks in mint #1, ref still NULL
+      await waitFor(() => gates.length >= 1);
+      const replay = startCheckout(ctx(), cartId, p); // ref still NULL → mints too, parks in #2
+      await waitFor(() => gates.length >= 2);
+
+      // The replay's mint resolves FIRST and stores its ref; the winner
+      // resolves after — pre-fix the winner's TX-D overwrote the stored
+      // ref with a gateway order the buyer was never shown, so the
+      // capture webhook for the paid ref matched nothing.
+      gates[1]!();
+      const replayRes = await replay;
+      gates[0]!();
+      const winnerRes = await winner;
+      if (winnerRes.status !== "payment_required" || replayRes.status !== "payment_required") {
+        throw new Error("expected payment_required from both");
+      }
+
+      expect(mints).toBe(2); // the race was real: two gateway orders were minted
+      expect(winnerRes.gatewayOrderId).toBe(replayRes.gatewayOrderId); // ONE ref surfaced
+      const order = await orderRow(winnerRes.orderId);
+      expect(order.gateway_order_ref).toBe(replayRes.gatewayOrderId);
+
+      // The surfaced ref is backed by exactly one payments row, and its
+      // capture confirms the order — no stranded money.
+      const paymentRows = await admin<{ gateway_order_id: string }[]>`
+        SELECT gateway_order_id FROM payments WHERE order_id = ${winnerRes.orderId}`;
+      expect(paymentRows.length).toBe(1);
+      expect(paymentRows[0]!.gateway_order_id).toBe(replayRes.gatewayOrderId);
+      await deliver(capture(replayRes.gatewayOrderId, replayRes.amountPaise));
+      expect((await orderRow(winnerRes.orderId)).status).toBe("confirmed");
+    } finally {
+      // On a failure path, unpark any still-gated adapter calls so the
+      // dangling checkouts settle instead of outliving the test.
+      for (const release of gates) release();
+      setGatewayAdapterResolver(() => fakeAdapter);
+    }
+  });
+
+  it("a same-key replay racing the confirm returns confirmed and leaves NO holds or TTL on the final order", async () => {
+    const variant = await makeVariant();
+    await seed(variant, 5);
+    const cartId = await makeCart([{ variantId: variant, quantity: 1 }]);
+    const p = payload();
+    const start = await startCheckout(ctx(), cartId, p);
+    if (start.status !== "payment_required") throw new Error("expected payment_required");
+
+    // Simulate the webhook confirm committing mid-replay: an open admin
+    // tx applies the confirm's row effects (status advanced, TTL
+    // cleared, holds consumed) and holds the row locks while the replay
+    // runs, so the replay serializes behind it exactly as it would
+    // behind processCaptured's TX-2.
+    let confirmed = false;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const confirmTx = admin.begin(async (sql) => {
+      await sql`
+        UPDATE orders SET status = 'confirmed', payment_status = 'paid',
+          confirmed_at = now(), expires_at = NULL
+        WHERE id = ${start.orderId}`;
+      await sql`
+        DELETE FROM stock_reservations
+        WHERE reference_type = 'checkout' AND reference_id = ${start.orderId}`;
+      confirmed = true;
+      await gate;
+    });
+    await waitFor(() => confirmed);
+
+    // The replay reads the stale pending status on its unlocked fast
+    // path, then blocks on the locked rows; the "confirm" commits while
+    // it waits.
+    const replayPromise = startCheckout(ctx(), cartId, p);
+    await sleep(400);
+    release();
+    await confirmTx;
+    const replay = await replayPromise;
+
+    // Pre-fix: payment_required, holds re-inserted, expires_at re-armed
+    // on the confirmed order — 15 minutes of double-counted stock.
+    expect(replay).toMatchObject({ orderId: start.orderId, status: "confirmed" });
+    const order = await orderRow(start.orderId);
+    expect(order.status).toBe("confirmed");
+    expect(order.expires_at).toBeNull();
+    const holds = await admin<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM stock_reservations
+      WHERE reference_type = 'checkout' AND reference_id = ${start.orderId}`;
+    expect(holds[0]!.n).toBe(0);
+  });
+
+  it("checkout-start and the confirm path lock promotion → customer in the SAME order: no deadlock", async () => {
+    const promo = await makePromotion({ effects: [{ type: "flat_off", paise: 500 }] });
+    const variant = await makeVariant();
+    await seed(variant, 5);
+    const cartId = await makeCart([{ variantId: variant, quantity: 1 }]);
+    const phone = freshPhone();
+    await admin`
+      INSERT INTO customers (id, tenant_id, phone_e164, name)
+      VALUES (${randomUUID()}, ${tenantA}, ${phone}, 'Deadlock Tester')`;
+
+    // The confirm side's exact lock order: promotion row FOR UPDATE
+    // (claimRedemption), then the customer row (markFirstOrder) — held
+    // open while a checkout for the same coupon + same buyer runs.
+    let promotionLocked = false;
+    let proceed!: () => void;
+    const proceedGate = new Promise<void>((resolve) => (proceed = resolve));
+    const confirmSideTx = admin.begin(async (sql) => {
+      await sql`SELECT id FROM promotions WHERE id = ${promo.id} FOR UPDATE`;
+      promotionLocked = true;
+      await proceedGate;
+      await sql`
+        UPDATE customers SET updated_at = now()
+        WHERE tenant_id = ${tenantA} AND phone_e164 = ${phone}`;
+    });
+    await waitFor(() => promotionLocked);
+
+    // Post-fix the checkout parks on the promotion lock BEFORE touching
+    // the customer row; pre-fix it already held the customer row (the
+    // upsert) while waiting here — the classic inversion, and the
+    // confirm side's customer UPDATE below then deadlocked (40P01).
+    const checkoutPromise = startCheckout(ctx(), cartId, payload({ couponCode: promo.code, phone }));
+    await sleep(400);
+    proceed();
+    await confirmSideTx; // pre-fix: one side dies with a deadlock here
+    const res = await checkoutPromise;
+
+    expect(res.status).toBe("payment_required");
+    const order = await orderRow(res.orderId);
+    expect(order.promotion_id).toBe(promo.id);
+  });
+
+  it("an add-to-cart racing checkout's cart conversion cannot slip a line onto the converted cart", async () => {
+    const v1 = await makeVariant();
+    const v2 = await makeVariant();
+    await seed(v1, 5);
+    await seed(v2, 5);
+    const cartId = await makeCart([{ variantId: v1, quantity: 1 }]);
+
+    // Simulate checkout's TX-A holding the cart row lock while it
+    // snapshots the lines and converts the cart.
+    let converted = false;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const txA = admin.begin(async (sql) => {
+      await sql`UPDATE carts SET status = 'converted' WHERE id = ${cartId}`;
+      converted = true;
+      await gate;
+    });
+    await waitFor(() => converted);
+
+    // Pre-fix the plain status SELECT saw 'active', the line insert
+    // landed, and only touchCart waited on the lock — the line survived
+    // on the converted cart, silently absent from the snapshotted order.
+    const attempt = upsertLine(ctx(), cartId, { variantId: v2, quantity: 1 });
+    await sleep(400);
+    release();
+    await txA;
+    await expect(attempt).rejects.toMatchObject({ code: "cart_not_active", status: 409 });
+    const lines = await admin<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM cart_lines WHERE cart_id = ${cartId} AND variant_id = ${v2}`;
+    expect(lines[0]!.n).toBe(0);
   });
 });

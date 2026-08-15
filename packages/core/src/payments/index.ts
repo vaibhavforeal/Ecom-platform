@@ -90,6 +90,13 @@ export type AdvancePolicy = {
   minAdvancePaise: number;
 };
 
+/**
+ * Razorpay refuses gateway orders under ₹1 (100 paise). A cod_advance
+ * split must never produce an advance the gateway will 400 AFTER the
+ * order, holds and cart conversion have committed.
+ */
+const GATEWAY_MIN_ORDER_PAISE = 100;
+
 /** 422 with the field-level shape every form renderer already understands. */
 function refuseSplit(code: string, path: string, message: string): never {
   throw new AppError({
@@ -151,7 +158,15 @@ export function computeAdvanceSplit(
   // prepaid order (advance = total, codDue = 0); a zero-total order stays
   // 0/0 because the upper clamp wins.
   const rawAdvance = Math.floor((totalPaise * policy.advanceBps + 5_000) / 10_000);
-  const advancePaise = Math.min(Math.max(rawAdvance, policy.minAdvancePaise), totalPaise);
+  let advancePaise = Math.min(Math.max(rawAdvance, policy.minAdvancePaise), totalPaise);
+  // Gateway floor: an advance in (0, 100) paise is raised to
+  // min(₹1, total) — Razorpay rejects sub-₹1 orders, and by the time the
+  // gateway refuses, the pending order has already claimed the cart for
+  // its whole TTL. A total under ₹1 collapses to fully prepaid
+  // (codDue 0); the exact-sum invariant below still holds.
+  if (advancePaise > 0 && advancePaise < GATEWAY_MIN_ORDER_PAISE) {
+    advancePaise = Math.min(GATEWAY_MIN_ORDER_PAISE, totalPaise);
+  }
   const codDuePaise = totalPaise - advancePaise;
 
   // The frozen invariant, asserted rather than assumed: a split that does

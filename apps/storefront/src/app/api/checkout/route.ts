@@ -6,6 +6,8 @@ import { setGatewayAdapterResolver, startCheckout } from "@platform/core/checkou
 import { getPaymentAdapter } from "@platform/integrations/payments";
 
 import {
+  CHECKOUT_START_LIMIT,
+  enforceBuyerRateLimit,
   errorResponse,
   newRequestId,
   parseBuyerBody,
@@ -40,6 +42,12 @@ export async function POST(req: Request): Promise<NextResponse> {
   try {
     const tenant = await resolveBuyerTenant(req);
     if (!tenant) return tenantNotFound(requestId);
+
+    // Unauthenticated door: burst-limit checkout starts per (tenant,
+    // client IP) BEFORE any body or database work — COD confirms orders
+    // synchronously (stock + sequential invoice numbers), and prepaid
+    // holds stock for the full pending window. 429 + Retry-After.
+    await enforceBuyerRateLimit(req, tenant.tenantId, CHECKOUT_START_LIMIT);
 
     const parsed = await parseBuyerBody(req, checkoutPayloadSchema, requestId);
     if (!parsed.ok) return parsed.response;

@@ -617,25 +617,30 @@ export async function startCheckout(
     );
   }
 
-  // Gateway modes need an enabled account before an order is created —
-  // failing after would strand a pending order until expiry. (Known
-  // narrow consequence: a 100%-off prepaid checkout on a store with no
-  // gateway is refused here rather than confirmed; pick COD instead.)
+  // Gateway modes want an enabled account, but the refusal must wait for
+  // the total: §4.2.6 says a zero-total order (100% discount) confirms
+  // through the same door with the gateway skipped entirely, even on a
+  // store with no gateway. Read the account here; refuse only after TX-A
+  // proves money must actually move.
   let account: EnabledPaymentAccount | null = null;
   if (clean.paymentMode !== "cod") {
     account = await withTenant(ctx.tenantId, (tx) => getEnabledAccount(tx, ctx.tenantId));
-    if (!account) {
-      refuse(
-        "payments_not_configured",
-        422,
-        "No enabled payment account for a gateway checkout",
-        "Online payment is not available on this store yet.",
-        { issues: [{ path: "paymentMode", message: "Online payment is not available." }] },
-      );
-    }
   }
 
   const seller = await loadSellerIdentity(ctx.tenantId);
+  // A GST-regular seller with no origin state would silently misclassify
+  // EVERY sale as inter-state IGST ('' never equals the buyer's state
+  // code) and freeze an empty seller state into the invoice — refuse
+  // before anything is written. Unregistered/composition tenants charge
+  // no GST and are unaffected.
+  if (seller.taxRegistrationType === "regular" && !seller.originStateCode?.trim()) {
+    refuse(
+      "seller_state_unconfigured",
+      422,
+      `Tenant ${ctx.tenantId} is GST-regular with no origin_state_code — set the origin state in store settings before selling`,
+      "This store cannot take orders yet: its GST origin state is not configured. Please contact the seller.",
+    );
+  }
 
   // [TX-A] — order creation.
   let created: Awaited<ReturnType<typeof createOrderTx>>;
@@ -715,13 +720,30 @@ export async function startCheckout(
     return { orderId: created.orderId, orderToken: signOrderToken(created.orderId), status: "confirmed" };
   }
 
+  if (!account) {
+    // Money must move and there is nowhere to move it. Cancel rather
+    // than strand the pending order until expiry — the cart reverts to
+    // active so the buyer can retry with COD.
+    await cancelPendingOrder(ctx, created.orderId, "payments_not_configured", {
+      name: "order.cancelled",
+      data: { reason: "payments_not_configured" },
+    });
+    refuse(
+      "payments_not_configured",
+      422,
+      "No enabled payment account for a gateway checkout",
+      "Online payment is not available on this store yet.",
+      { issues: [{ path: "paymentMode", message: "Online payment is not available." }] },
+    );
+  }
+
   // Expiry BEFORE the gateway call: a gateway failure must still leave
   // the pending order reaped (D10).
   await enqueueExpireJob(ctx.tenantId, created.orderId, created.expiresAt);
 
   return startGatewayPayment(ctx, {
     orderId: created.orderId,
-    account: account!,
+    account,
     amountPaise: created.advancePaise,
   });
 }
@@ -799,6 +821,28 @@ async function createOrderTx(
       refuse("cart_empty", 422, `Cart ${cartId} has no purchasable lines`, "Your cart is empty.");
     }
 
+    // LOCK-ORDER INVARIANT (deadlock discipline): the promotion row is
+    // locked BEFORE the customer row, here AND in confirmOrderCore
+    // (claimRedemption's promotion lock precedes markFirstOrder's
+    // customer-row update). Upserting the customer first inverts the
+    // order and can deadlock a buyer's next coupon checkout against
+    // their first order's webhook confirm. The FOR UPDATE load also
+    // serializes BOTH the advisory count below and the confirm-time slot
+    // computation (D8).
+    let promotion: PromotionData | null = null;
+    if (clean.couponCode) {
+      promotion = await loadActivePromotionForUpdate(tx, ctx.tenantId, clean.couponCode);
+      if (!promotion) {
+        refuse(
+          "coupon_invalid",
+          422,
+          `Coupon ${clean.couponCode} absent or inactive`,
+          "That coupon code is not valid.",
+          { issues: [{ path: "couponCode", message: "That coupon code is not valid." }] },
+        );
+      }
+    }
+
     const customer = await upsertCustomerByPhone(tx, ctx.tenantId, {
       phoneE164: clean.phone,
       name: clean.buyerName,
@@ -811,24 +855,10 @@ async function createOrderTx(
       freeAbovePaise: settings.freeAbovePaise,
     });
 
-    // Coupon: FOR UPDATE load serializes BOTH the advisory count here and
-    // the confirm-time slot computation (D8).
-    let promotion: PromotionData | null = null;
     let discountPaise = 0;
     let lineDiscounts: number[] = rows.map(() => 0);
     let shippingPaise = shippingBasePaise;
-    if (clean.couponCode) {
-      promotion = await loadActivePromotionForUpdate(tx, ctx.tenantId, clean.couponCode);
-      if (!promotion) {
-        refuse(
-          "coupon_invalid",
-          422,
-          `Coupon ${clean.couponCode} absent or inactive`,
-          "That coupon code is not valid.",
-          { issues: [{ path: "couponCode", message: "That coupon code is not valid." }] },
-        );
-      }
-
+    if (promotion) {
       const productIds = [...new Set(rows.map((r) => r.productId))];
       const categoryRows = await tx
         .select({ productId: productCategories.productId, categoryId: productCategories.categoryId })
@@ -1183,6 +1213,26 @@ async function startGatewayPayment(
   ctx: BuyerContext,
   args: { orderId: string; account: EnabledPaymentAccount; amountPaise: number },
 ): Promise<CheckoutStartResponse> {
+  const paymentRequired = (ref: string): CheckoutStartResponse => ({
+    orderId: args.orderId,
+    orderToken: signOrderToken(args.orderId),
+    status: "payment_required",
+    gatewayOrderId: ref,
+    publicKeyId: args.account.publicKeyId,
+    amountPaise: args.amountPaise,
+  });
+
+  // NEVER mint a second gateway order while one is already stored:
+  // Razorpay does not dedupe on receipt, and the capture webhook
+  // resolves the order via orders.gateway_order_ref, so a superseded
+  // ref strands captured money. Check under the order row lock — it
+  // serializes against a concurrent payment-start's [TX-D] below.
+  const storedRef = await withTenant(ctx.tenantId, async (tx) => {
+    const row = await lockOrder(tx, ctx.tenantId, args.orderId);
+    return row?.gatewayOrderRef ?? null;
+  });
+  if (storedRef) return paymentRequired(storedRef);
+
   const adapter = resolveAdapter(args.account.providerCode);
   const creds = await unsealGatewayCredentials(ctx.tenantId, args.account);
   const { gatewayOrderId } = await adapter.createGatewayOrder(creds, {
@@ -1194,7 +1244,16 @@ async function startGatewayPayment(
     receipt: args.orderId,
   });
 
-  await withTenant(ctx.tenantId, async (tx) => {
+  // [TX-D] First writer wins under the order row lock: if a concurrent
+  // payment-start stored a DIFFERENT ref while our vendor call was in
+  // flight, keep theirs (its payments row already exists) and hand the
+  // buyer that ref — our freshly minted gateway order is never
+  // surfaced, so nobody can pay the ref the webhook lookup would miss.
+  const finalRef = await withTenant(ctx.tenantId, async (tx) => {
+    const row = await lockOrder(tx, ctx.tenantId, args.orderId);
+    if (row?.gatewayOrderRef && row.gatewayOrderRef !== gatewayOrderId) {
+      return row.gatewayOrderRef;
+    }
     // Reuse an existing attempt row (a replayed payment-start against a
     // deduping gateway returns the same gateway order id).
     const existing = await findPaymentByGatewayOrder(tx, ctx.tenantId, args.orderId, gatewayOrderId);
@@ -1215,16 +1274,10 @@ async function startGatewayPayment(
         updatedAt: new Date(),
       })
       .where(and(eq(orders.tenantId, ctx.tenantId), eq(orders.id, args.orderId)));
+    return gatewayOrderId;
   });
 
-  return {
-    orderId: args.orderId,
-    orderToken: signOrderToken(args.orderId),
-    status: "payment_required",
-    gatewayOrderId,
-    publicKeyId: args.account.publicKeyId,
-    amountPaise: args.amountPaise,
-  };
+  return paymentRequired(finalRef);
 }
 
 /**
@@ -1277,7 +1330,12 @@ async function replayCheckout(
     return { orderId: order.id, orderToken: signOrderToken(order.id), status: "confirmed" };
   }
 
-  // Still pending: refresh the hold (replace semantics) and the TTL.
+  // Still pending on the fast-path read — but that read was UNLOCKED and
+  // may be stale: a webhook confirm can commit at any moment. Refresh
+  // the hold (replace semantics) first, then re-check the status under
+  // the order row lock before extending the TTL; a replay that lost the
+  // race must return the settled outcome, not resurrect holds/expiry on
+  // a final order.
   const holdLines = holdLinesOf(lines);
   try {
     await holdStock(
@@ -1295,12 +1353,55 @@ async function replayCheckout(
     throw err;
   }
   const expiresAt = new Date(Date.now() + CHECKOUT_EXPIRY_MINUTES * 60_000);
-  await withTenant(ctx.tenantId, (tx) =>
-    tx
-      .update(orders)
-      .set({ expiresAt, updatedAt: new Date() })
-      .where(and(eq(orders.tenantId, ctx.tenantId), eq(orders.id, order.id))),
-  );
+  const fresh = await withTenant(ctx.tenantId, async (tx) => {
+    const row = await lockOrder(tx, ctx.tenantId, order.id);
+    if (row && row.status === "pending_payment") {
+      // Status-guarded on top of the lock: only a still-pending order
+      // gets its TTL extended.
+      await tx
+        .update(orders)
+        .set({ expiresAt, updatedAt: new Date() })
+        .where(
+          and(
+            eq(orders.tenantId, ctx.tenantId),
+            eq(orders.id, order.id),
+            eq(orders.status, "pending_payment"),
+          ),
+        );
+    }
+    return row;
+  });
+  if (!fresh || fresh.status !== "pending_payment") {
+    // A confirm/cancel/expiry committed between the unlocked read and
+    // the lock. Drop the hold rows we just re-inserted (the winner
+    // consumed or released the originals; ours would double-count
+    // availability for the whole TTL) and report the settled outcome.
+    try {
+      await releaseStock({ tenantId: ctx.tenantId, requestId: ctx.requestId ?? null }, {
+        type: "checkout",
+        id: order.id,
+      });
+    } catch (err) {
+      logSoftFailure("hold release", ctx.tenantId, err);
+    }
+    if (!fresh || fresh.status === "cancelled") {
+      refuse(
+        "checkout_cancelled",
+        422,
+        `Order ${order.id} was cancelled; the same idempotency key cannot revive it`,
+        "This checkout could not be completed. Please try again.",
+      );
+    }
+    if (fresh.status === "abandoned") {
+      refuse(
+        "checkout_expired",
+        422,
+        `Order ${order.id} expired; the same idempotency key cannot revive it`,
+        "This checkout expired. Please start again.",
+      );
+    }
+    return { orderId: order.id, orderToken: signOrderToken(order.id), status: "confirmed" };
+  }
   await enqueueExpireJob(ctx.tenantId, order.id, expiresAt);
 
   // A pending COD/zero-total order means a confirm crashed mid-flight —
@@ -1334,7 +1435,12 @@ async function replayCheckout(
     );
   }
   const advancePaise = order.totalPaise - order.codDuePaise;
-  if (!order.gatewayOrderRef) {
+  // Decide off the LOCKED read: the fast-path row may predate a
+  // concurrent payment-start's [TX-D]. When a ref exists it is reused
+  // verbatim; when it does not, startGatewayPayment re-checks under the
+  // order row lock itself before minting, so two racing replays can
+  // never surface two different gateway orders.
+  if (!fresh.gatewayOrderRef) {
     // Crash between TX-A and payment-start — run payment-start now.
     return startGatewayPayment(ctx, { orderId: order.id, account, amountPaise: advancePaise });
   }
@@ -1342,7 +1448,7 @@ async function replayCheckout(
     orderId: order.id,
     orderToken: signOrderToken(order.id),
     status: "payment_required",
-    gatewayOrderId: order.gatewayOrderRef,
+    gatewayOrderId: fresh.gatewayOrderRef,
     publicKeyId: account.publicKeyId,
     amountPaise: advancePaise,
   };
@@ -1397,6 +1503,11 @@ async function confirmOrderCore(
   );
 
   // (h) — coupon claim under the promotion lock.
+  // LOCK-ORDER INVARIANT: the promotion row (locked here, before
+  // claimRedemption's counts) comes BEFORE the customer row
+  // (markFirstOrder, step j) — the same global order createOrderTx
+  // follows (promotion FOR UPDATE before the customer upsert), so the
+  // two transactions can never deadlock across these tables.
   let overredeemedEvent: OrderEventDescriptor | null = null;
   if (order.promotionId) {
     const promotion = await loadPromotionById(tx, actor.tenantId, order.promotionId);
@@ -1666,8 +1777,14 @@ export async function confirmFromWebhookEvent(
 }
 
 type CaptureResult =
-  | { kind: "ignored" | "replay" | "amount_mismatch" }
-  | { kind: "late_capture"; refundId: string; refundCreated: boolean }
+  | { kind: "ignored" | "replay" }
+  | { kind: "amount_mismatch"; mismatchEvent: OrderEventDescriptor }
+  | {
+      kind: "late_capture";
+      refundId: string;
+      refundCreated: boolean;
+      lateCapturedEvent: OrderEventDescriptor | null;
+    }
   | { kind: "confirmed"; outcome: ConfirmOutcome };
 
 async function processCaptured(
@@ -1710,12 +1827,12 @@ async function processCaptured(
           errorCode: "amount_mismatch",
           errorDescription: `expected ${payment.amountPaise}, gateway reported ${event.amountPaise}`,
         });
-        await insertOrderEvent(tx, actor, order.id, "payment.amount_mismatch", {
+        const mismatchEvent = await insertOrderEvent(tx, actor, order.id, "payment.amount_mismatch", {
           expectedPaise: payment.amountPaise,
           reportedPaise: event.amountPaise,
           webhookEventId,
         });
-        return { kind: "amount_mismatch" };
+        return { kind: "amount_mismatch", mismatchEvent };
       }
 
       // (d) late capture — abandoned stays abandoned (D9); any other
@@ -1737,14 +1854,20 @@ async function processCaptured(
           amountPaise: event.amountPaise,
           reason: "late_capture_abandoned",
         });
+        let lateCapturedEvent: OrderEventDescriptor | null = null;
         if (refund.created) {
-          await insertOrderEvent(tx, actor, order.id, "payment.late_captured", {
+          lateCapturedEvent = await insertOrderEvent(tx, actor, order.id, "payment.late_captured", {
             amountPaise: event.amountPaise,
             orderStatus: order.status,
             webhookEventId,
           });
         }
-        return { kind: "late_capture", refundId: refund.refundId, refundCreated: refund.created };
+        return {
+          kind: "late_capture",
+          refundId: refund.refundId,
+          refundCreated: refund.created,
+          lateCapturedEvent,
+        };
       }
 
       // (e) capture + amounts.
@@ -1780,7 +1903,9 @@ async function processCaptured(
     throw err;
   }
 
-  // Post-commit effects.
+  // Post-commit effects. §5.2: payment.amount_mismatch and
+  // payment.late_captured ride the orders queue like every other
+  // cataloged event (jobId = order_events.id, fail-soft).
   if (result.kind === "confirmed") {
     await enqueueOrderEvent(result.outcome.confirmedEvent);
     if (result.outcome.overredeemedEvent) await enqueueOrderEvent(result.outcome.overredeemedEvent);
@@ -1790,7 +1915,10 @@ async function processCaptured(
         catalogPurgeTags(ctx.tenantId, result.outcome.productIds),
       );
     }
+  } else if (result.kind === "amount_mismatch") {
+    await enqueueOrderEvent(result.mismatchEvent);
   } else if (result.kind === "late_capture") {
+    if (result.lateCapturedEvent) await enqueueOrderEvent(result.lateCapturedEvent);
     await enqueueRefundJob(ctx.tenantId, result.refundId);
   }
 }
@@ -1936,27 +2064,29 @@ async function processFailed(ctx: BuyerContext, event: GatewayEvent): Promise<vo
     actorType: "system",
     requestId: ctx.requestId ?? null,
   };
-  await withTenant(ctx.tenantId, async (tx) => {
+  const descriptor = await withTenant(ctx.tenantId, async (tx) => {
     const [orderRef] = await tx
       .select({ id: orders.id })
       .from(orders)
       .where(and(eq(orders.tenantId, ctx.tenantId), eq(orders.gatewayOrderRef, event.gatewayOrderId)))
       .limit(1);
-    if (!orderRef) return;
+    if (!orderRef) return null;
     const order = (await lockOrder(tx, ctx.tenantId, orderRef.id))!;
     const payment = await findPaymentByGatewayOrder(tx, ctx.tenantId, order.id, event.gatewayOrderId);
     // Never downgrade a capture; a failed retry after success is noise.
-    if (!payment || payment.status === "captured") return;
+    if (!payment || payment.status === "captured") return null;
     await markPaymentFailed(tx, ctx.tenantId, {
       paymentId: payment.id,
       errorCode: event.error?.code ?? null,
       errorDescription: event.error?.description ?? null,
     });
     // Order stays pending_payment — the buyer may retry until expiry.
-    await insertOrderEvent(tx, actor, order.id, "payment.failed", {
+    return insertOrderEvent(tx, actor, order.id, "payment.failed", {
       errorCode: event.error?.code ?? null,
     });
   });
+  // §5.2: after the writing tx, jobId = order_events.id, fail-soft.
+  if (descriptor) await enqueueOrderEvent(descriptor);
 }
 
 async function processRefundProcessed(ctx: BuyerContext, event: GatewayEvent): Promise<void> {

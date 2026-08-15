@@ -1,3 +1,4 @@
+import { parseAmountToPaise } from "@platform/core/catalog";
 import type {
   Condition,
   Effect,
@@ -191,13 +192,28 @@ export function toSerializable(promotion: PromotionData) {
   };
 }
 
+/**
+ * Rupees → paise through the repo's canonical string-decimal parser
+ * (@platform/core/catalog money.ts), never `Number(value) * 100`: a
+ * float shortcut silently rounds "99.999" to ₹100.00 — a discount the
+ * merchant did not type — and accepts "1e5" as ₹1,00,000. More than two
+ * decimal places is a refusal, not a rounding.
+ */
 function parseRupees(value: string, path: string, issues: Issue[], min: number): number {
-  const rupees = Number(value.trim());
-  if (value.trim() === "" || !Number.isFinite(rupees)) {
+  if (value.trim() === "") {
     issues.push({ path, message: "Enter an amount in rupees." });
     return min;
   }
-  const paise = Math.round(rupees * 100);
+  let paise: number;
+  try {
+    paise = parseAmountToPaise(value);
+  } catch {
+    issues.push({
+      path,
+      message: "Enter a plain rupee amount with at most 2 decimal places.",
+    });
+    return min;
+  }
   if (paise < min) issues.push({ path, message: "The amount is too small." });
   return paise;
 }

@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 
-import { AppError, resolveTenantByHost } from "@platform/core";
-import type { ResolvedTenant } from "@platform/core";
+import { AppError, RateLimitedError, consumeRateLimit, resolveTenantByHost } from "@platform/core";
+import type { RateLimitRule, ResolvedTenant } from "@platform/core";
 import type { z } from "zod";
 
 /**
@@ -45,12 +45,62 @@ export function tenantNotFound(requestId: string): NextResponse {
   );
 }
 
+/**
+ * Rate limits for the UNAUTHENTICATED buyer doors (same Redis limiter as
+ * the console's OTP throttles). Checkout-start is the tight one: a COD
+ * checkout synchronously confirms an order — decrementing stock and
+ * consuming a sequential GST invoice number — so an unthrottled loop is
+ * an inventory/document-series denial of service; prepaid loops hold all
+ * stock for 25-minute windows on repeat. Cart mutations are cheap and
+ * reversible, so their limit only has to stop scripted flooding, not an
+ * enthusiastic shopper.
+ */
+export const CHECKOUT_START_LIMIT: RateLimitRule = {
+  name: "checkout:start",
+  limit: 5,
+  windowSeconds: 60,
+};
+export const CART_MUTATION_LIMIT: RateLimitRule = {
+  name: "cart:mutate",
+  limit: 60,
+  windowSeconds: 60,
+};
+
+/**
+ * Client IP for rate-limit bucketing: the FIRST hop of x-forwarded-for
+ * (Caddy appends the peer address; earlier hops are client-supplied but
+ * lying only splits the attacker across more buckets of the same
+ * per-tenant limit). "unknown" covers direct local-dev connections.
+ */
+function clientIpOf(req: Request): string {
+  const first = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
+  return first && first.length > 0 ? first : "unknown";
+}
+
+/**
+ * Throws RateLimitedError (429 + Retry-After via errorResponse) when the
+ * (tenant, client IP) bucket is exhausted. Call it right after tenant
+ * resolution, before any body read or database work — the point is to
+ * refuse cheaply.
+ */
+export async function enforceBuyerRateLimit(
+  req: Request,
+  tenantId: string,
+  rule: RateLimitRule,
+): Promise<void> {
+  await consumeRateLimit(rule, `${tenantId}:${clientIpOf(req)}`);
+}
+
 /** One place where buyer-route errors become responses (console parity). */
 export function errorResponse(err: unknown, requestId: string): NextResponse {
   if (err instanceof AppError) {
     console.warn(
       JSON.stringify({ level: "warn", requestId, code: err.code, message: err.message }),
     );
+    const headers: Record<string, string> = {};
+    if (err instanceof RateLimitedError) {
+      headers["Retry-After"] = String(err.retryAfterSeconds);
+    }
     return NextResponse.json(
       {
         error: {
@@ -60,7 +110,7 @@ export function errorResponse(err: unknown, requestId: string): NextResponse {
         },
         requestId,
       },
-      { status: err.status },
+      { status: err.status, headers },
     );
   }
 

@@ -5,6 +5,8 @@ import { getCartView, getOrCreateCart, upsertLine } from "@platform/core/cart/se
 import { z } from "zod";
 
 import {
+  CART_MUTATION_LIMIT,
+  enforceBuyerRateLimit,
   errorResponse,
   newRequestId,
   parseBuyerBody,
@@ -64,6 +66,10 @@ export async function POST(req: Request): Promise<NextResponse> {
   try {
     const tenant = await resolveBuyerTenant(req);
     if (!tenant) return tenantNotFound(requestId);
+
+    // Mutations only (reads stay unlimited) — the laxer sibling of the
+    // checkout-start limit; see buyer-api.ts.
+    await enforceBuyerRateLimit(req, tenant.tenantId, CART_MUTATION_LIMIT);
 
     const parsed = await parseBuyerBody(req, upsertPayloadSchema, requestId);
     if (!parsed.ok) return parsed.response;

@@ -379,10 +379,11 @@ describe("computeAdvanceSplit", () => {
     expect(
       computeAdvanceSplit(999, { codEnabled: true, advanceBps: 2500, minAdvancePaise: 0 }, "cod_advance"),
     ).toEqual({ advancePaise: 250, codDuePaise: 749 });
-    // 1000 × 25 / 10000 = 2.5 → HALF_UP → 3, never banker's 2.
+    // 41000 × 25 / 10000 = 102.5 → HALF_UP → 103, never banker's 102
+    // (kept above the ₹1 gateway floor so the rounding is observable).
     expect(
-      computeAdvanceSplit(1000, { codEnabled: true, advanceBps: 25, minAdvancePaise: 0 }, "cod_advance"),
-    ).toEqual({ advancePaise: 3, codDuePaise: 997 });
+      computeAdvanceSplit(41000, { codEnabled: true, advanceBps: 25, minAdvancePaise: 0 }, "cod_advance"),
+    ).toEqual({ advancePaise: 103, codDuePaise: 40897 });
   });
 
   it("clamps the advance up to the floor and down to the total", () => {
@@ -396,6 +397,61 @@ describe("computeAdvanceSplit", () => {
       advancePaise: 3000,
       codDuePaise: 0,
     });
+  });
+
+  it("gateway floor: an advance in (0, ₹1) is raised to 100 paise — never an amount Razorpay refuses", () => {
+    // ₹50 cart at 1% with no configured floor: raw advance 50 paise —
+    // pre-fix this went to createGatewayOrder AFTER the order, holds and
+    // cart conversion had committed, and the gateway 400'd it.
+    expect(
+      computeAdvanceSplit(5000, { codEnabled: true, advanceBps: 100, minAdvancePaise: 0 }, "cod_advance"),
+    ).toEqual({ advancePaise: 100, codDuePaise: 4900 });
+    // 1000 × 25 bps rounds HALF_UP to 3 paise — clamped up to ₹1.
+    expect(
+      computeAdvanceSplit(1000, { codEnabled: true, advanceBps: 25, minAdvancePaise: 0 }, "cod_advance"),
+    ).toEqual({ advancePaise: 100, codDuePaise: 900 });
+    // A merchant floor below ₹1 is applied and then still lifted to ₹1.
+    expect(
+      computeAdvanceSplit(5000, { codEnabled: true, advanceBps: 10, minAdvancePaise: 40 }, "cod_advance"),
+    ).toEqual({ advancePaise: 100, codDuePaise: 4900 });
+  });
+
+  it("gateway floor, total under ₹1: the lift is capped at the total (collapses to fully prepaid)", () => {
+    // ₹0.50 total at 1%: raw advance 1 paise → min(100, 50) = 50, codDue 0.
+    expect(
+      computeAdvanceSplit(50, { codEnabled: true, advanceBps: 100, minAdvancePaise: 0 }, "cod_advance"),
+    ).toEqual({ advancePaise: 50, codDuePaise: 0 });
+    // 99 paise fully advanced stays 99/0 — the total caps the lift.
+    expect(
+      computeAdvanceSplit(99, { codEnabled: true, advanceBps: 10000, minAdvancePaise: 0 }, "cod_advance"),
+    ).toEqual({ advancePaise: 99, codDuePaise: 0 });
+  });
+
+  it("gateway floor touches nothing else: advance 0 and advance ≥ ₹1 pass through", () => {
+    // A raw advance of 0 stays 0 — the floor lifts only a POSITIVE advance.
+    expect(
+      computeAdvanceSplit(4, { codEnabled: true, advanceBps: 100, minAdvancePaise: 0 }, "cod_advance"),
+    ).toEqual({ advancePaise: 0, codDuePaise: 4 });
+    // Exactly ₹1 is already payable.
+    expect(
+      computeAdvanceSplit(10000, { codEnabled: true, advanceBps: 100, minAdvancePaise: 0 }, "cod_advance"),
+    ).toEqual({ advancePaise: 100, codDuePaise: 9900 });
+  });
+
+  it("the exact-sum invariant holds with the floor across awkward small totals", () => {
+    const policies = [
+      { codEnabled: true, advanceBps: 25, minAdvancePaise: 0 },
+      { codEnabled: true, advanceBps: 100, minAdvancePaise: 0 },
+      { codEnabled: true, advanceBps: 100, minAdvancePaise: 40 },
+    ];
+    for (const pol of policies) {
+      for (const total of [1, 2, 50, 99, 100, 101, 999, 5000, 9999, 10001]) {
+        const { advancePaise, codDuePaise } = computeAdvanceSplit(total, pol, "cod_advance");
+        expect(advancePaise + codDuePaise).toBe(total);
+        // Never a gateway-refusable advance: 0, ≥ ₹1, or the whole total.
+        expect(advancePaise === 0 || advancePaise >= 100 || advancePaise === total).toBe(true);
+      }
+    }
   });
 
   it("zero-total orders split 0/0 in every mode (gateway skipped)", () => {
