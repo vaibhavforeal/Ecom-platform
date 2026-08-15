@@ -12,20 +12,16 @@ confirmation inside the order transaction).
 
 ## Waves
 
-- [ ] **A. Design** (workflow): conventions brief from PROJECT_STATUS
-      traps + existing code patterns; 3-way independent schema/flow
-      design panel → judged → synthesized into
-      `docs/design/PHASE2_COMMERCE_DESIGN.md`. I review before build.
-- [ ] **B. Schema** (single agent, serial — gates everything): migration
-      0008 — customers/addresses, carts+lines, orders+lines, payments,
-      invoice_series+invoices, promotions+coupon_redemptions,
-      serviceability; enums; PLATFORM_TABLES classification; isolation
-      test expansion. Gate: db integration suite green.
-- [ ] **C. Pure domain** (parallel agents, disjoint files, unit-TDD):
-      GST engine (100% branch) · promotions evaluation (pure fn) ·
-      partial-payment math · invoice number allocator · serviceability
-      check. Integration suites run centrally between waves, never by
-      builders (shared DB).
+- [x] **A. Design** — DONE 01:01. Spec at `docs/design/PHASE2_COMMERCE_DESIGN.md`
+      (1296 lines, 21 decisions); judges 2-1 for minimal-diff + grafts.
+      Note: designers must WRITE files, not return blobs (stall detector).
+- [x] **B. Schema spine (S0)** — DONE 01:40, committed. Migration 0008
+      (15 tables) applied; checkpoint #1 green (existing 238 integration
+      pass on new schema + inventory extract-method refactor).
+- [ ] **C. Parallel build lots B1–B5** — IN PROGRESS (launched 01:45):
+      B1 tax+invoices · B2 promotions · B3 payments · B4 cart+storefront
+      · B5 orders+console. Disjoint file ownership; builders run unit
+      tests only; integration checkpoint #2 (mine) after all report.
 - [ ] **D. Checkout orchestration** (serial core): cart server module →
       checkout-start (holdStock + pending_payment order) → payment
       adapter contract + mock + razorpay drivers → webhook route (HMAC,

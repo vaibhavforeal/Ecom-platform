@@ -37,6 +37,7 @@
   },
   "dependencies": {
     "@platform/db": "workspace:*",
+    "bullmq": "^5.34.4",
     "ioredis": "^5.4.1",
     "sanitize-html": "^2.14.0",
     "uuid": "^11.0.3",

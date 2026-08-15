@@ -11,6 +11,8 @@ import type {
   OrderStatus,
 } from "@platform/db/schema";
 
+import { AppError } from "../errors";
+
 /**
  * Orders — PURE barrel, safe for client bundles (the console renders its
  * action buttons from ORDER_TRANSITIONS). Values come from
@@ -105,16 +107,33 @@ export type OrderDomainEvent = {
   data?: Record<string, unknown>;
 };
 
-export function canTransition(_from: OrderStatus, _to: OrderStatus): boolean {
-  throw new Error("S0 stub: implemented by lot B5");
+export function canTransition(from: OrderStatus, to: OrderStatus): boolean {
+  return (ORDER_TRANSITIONS[from] ?? []).includes(to);
 }
 
 /** Throws a 422 AppError `invalid_transition` with {from, to, allowed} details. */
-export function assertTransition(_from: OrderStatus, _to: OrderStatus): void {
-  throw new Error("S0 stub: implemented by lot B5");
+export function assertTransition(from: OrderStatus, to: OrderStatus): void {
+  if (canTransition(from, to)) return;
+  const allowed = ORDER_TRANSITIONS[from] ?? [];
+  throw new AppError({
+    code: "invalid_transition",
+    message: `Order transition ${from} → ${to} is not in the transition table`,
+    status: 422,
+    publicMessage: `An order that is ${label(from)} cannot move to ${label(to)}.`,
+    details: { from, to, allowed },
+  });
 }
 
-/** Merchant-facing label, e.g. prefix 'ORD' + 1001 → 'ORD-1001'. */
-export function formatOrderNumber(_prefix: string, _orderNumber: number): string {
-  throw new Error("S0 stub: implemented by lot B5");
+/** 'ready_to_ship' → 'ready to ship' — for merchant-facing refusals. */
+function label(status: OrderStatus): string {
+  return status.replaceAll("_", " ");
+}
+
+/**
+ * Merchant-facing label, e.g. prefix 'ORD' + 1001 → 'ORD-1001'. An empty
+ * prefix yields the bare number — no dangling separator.
+ */
+export function formatOrderNumber(prefix: string, orderNumber: number): string {
+  const trimmed = prefix.trim();
+  return trimmed ? `${trimmed}-${orderNumber}` : String(orderNumber);
 }

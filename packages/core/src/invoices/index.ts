@@ -95,16 +95,106 @@ export type InvoiceDoc = {
   irnQr: string | null;
 };
 
+/** Minimum digits in the rendered number: 'INV/2026-27/0042'. */
+export const INVOICE_NUMBER_PAD = 4;
+
 /** Renders '{prefix}/{FY}/{padded number}', frozen at issue. */
 export function formatInvoiceNumber(
-  _prefix: string,
-  _financialYear: string,
-  _number: number,
+  prefix: string,
+  financialYear: string,
+  number: number,
 ): string {
-  throw new Error("S0 stub: implemented by lot B1");
+  if (!Number.isSafeInteger(number) || number < 0) {
+    throw new Error(`formatInvoiceNumber: number must be a non-negative integer, got ${number}`);
+  }
+  return `${prefix}/${financialYear}/${String(number).padStart(INVOICE_NUMBER_PAD, "0")}`;
+}
+
+const ONES = [
+  "",
+  "One",
+  "Two",
+  "Three",
+  "Four",
+  "Five",
+  "Six",
+  "Seven",
+  "Eight",
+  "Nine",
+  "Ten",
+  "Eleven",
+  "Twelve",
+  "Thirteen",
+  "Fourteen",
+  "Fifteen",
+  "Sixteen",
+  "Seventeen",
+  "Eighteen",
+  "Nineteen",
+] as const;
+
+const TENS = [
+  "",
+  "",
+  "Twenty",
+  "Thirty",
+  "Forty",
+  "Fifty",
+  "Sixty",
+  "Seventy",
+  "Eighty",
+  "Ninety",
+] as const;
+
+/** 1–99 → 'Seven' | 'Nineteen' | 'Twenty-One' | 'Ninety'. */
+function twoDigitWords(n: number): string {
+  if (n < 20) return ONES[n] as string;
+  const tens = TENS[Math.trunc(n / 10)] as string;
+  const ones = n % 10;
+  return ones === 0 ? tens : `${tens}-${ONES[ones]}`;
+}
+
+/** 1–999. */
+function threeDigitWords(n: number): string {
+  const hundreds = Math.trunc(n / 100);
+  const rest = n % 100;
+  const parts: string[] = [];
+  if (hundreds > 0) parts.push(`${ONES[hundreds]} Hundred`);
+  if (rest > 0) parts.push(twoDigitWords(rest));
+  return parts.join(" ");
+}
+
+/** Indian-system words for n ≥ 1: crore / lakh / thousand / hundred. */
+function indianWords(n: number): string {
+  if (n >= 10_000_000) {
+    const crore = Math.trunc(n / 10_000_000);
+    const rest = n % 10_000_000;
+    const head = `${indianWords(crore)} Crore`;
+    return rest > 0 ? `${head} ${indianWords(rest)}` : head;
+  }
+  const parts: string[] = [];
+  const lakh = Math.trunc(n / 100_000);
+  if (lakh > 0) parts.push(`${twoDigitWords(lakh)} Lakh`);
+  const thousand = Math.trunc((n % 100_000) / 1000);
+  if (thousand > 0) parts.push(`${twoDigitWords(thousand)} Thousand`);
+  const rest = n % 1000;
+  if (rest > 0) parts.push(threeDigitWords(rest));
+  return parts.join(" ");
 }
 
 /** Indian-system amount in words for the invoice footer (unit-tested, D19/§8). */
-export function amountInWords(_amountPaise: number): string {
-  throw new Error("S0 stub: implemented by lot B1");
+export function amountInWords(amountPaise: number): string {
+  if (!Number.isSafeInteger(amountPaise) || amountPaise < 0) {
+    throw new Error(
+      `amountInWords: amount must be a non-negative integer in paise, got ${amountPaise}`,
+    );
+  }
+  const rupees = Math.trunc(amountPaise / 100);
+  const paise = amountPaise % 100;
+  if (rupees === 0 && paise === 0) return "Zero Rupees Only";
+  const rupeeUnit = rupees === 1 ? "Rupee" : "Rupees";
+  const paisaUnit = paise === 1 ? "Paisa" : "Paise";
+  if (rupees === 0) return `${twoDigitWords(paise)} ${paisaUnit} Only`;
+  if (paise === 0) return `${indianWords(rupees)} ${rupeeUnit} Only`;
+  return `${indianWords(rupees)} ${rupeeUnit} and ${twoDigitWords(paise)} ${paisaUnit} Only`;
 }

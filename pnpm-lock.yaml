@@ -102,6 +102,9 @@ importers:
       react-dom:
         specifier: ^19.0.0
         version: 19.2.8(react@19.2.8)
+      zod:
+        specifier: ^3.24.1
+        version: 3.25.76
     devDependencies:
       '@types/node':
         specifier: ^22.10.2
@@ -178,6 +181,9 @@ importers:
       '@platform/db':
         specifier: workspace:*
         version: link:../db
+      bullmq:
+        specifier: ^5.34.4
+        version: 5.81.3
       ioredis:
         specifier: ^5.4.1
         version: 5.11.1

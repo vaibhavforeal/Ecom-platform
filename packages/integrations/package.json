@@ -6,6 +6,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./carriers": "./src/carriers/index.ts",
+    "./payments": "./src/payments/index.ts",
     "./storage": "./src/storage/index.ts"
   },
   "scripts": {
