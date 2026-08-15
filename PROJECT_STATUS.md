@@ -1,6 +1,6 @@
 # Project Status
 
-**Last updated:** 2026-08-14
+**Last updated:** 2026-08-15
 
 Working notes for picking this up after a break. Architecture lives in
 [`PLATFORM_BLUEPRINT.md`](./PLATFORM_BLUEPRINT.md); day-to-day commands live in
@@ -15,6 +15,7 @@ Working notes for picking this up after a break. Architecture lives in
 | **Phase 0 — Foundations** | ✅ Complete and verified end to end |
 | **Multi-carrier logistics** | ✅ Framework complete; vendor HTTP transport deliberately not written |
 | **Phase 1 — Catalog & Storefront** | ✅ Complete — merged to `master` 2026-08-13 (`b219e4f`). See the piece-by-piece table below |
+| **Phase 2 — Commerce Core** | 🚧 Started — inventory ledger shipped (see below) |
 
 ### Phase 1 progress
 
@@ -304,6 +305,54 @@ in `docs/DEPLOYMENT.md` (the runbook).
 
 Stack left running for spot-checks, then torn down per Task 6 (`docker compose down`,
 volumes preserved). Dev infrastructure (ports 5442/6442/6389) untouched throughout.
+
+### Verified 2026-08-15 (inventory ledger, full, all green)
+
+```
+pnpm lint                clean
+pnpm typecheck           6/6 packages
+pnpm build               2/2 Next apps      (Next 16.3.0, Turbopack)
+pnpm test                328 unit tests     (core 282, integrations 46)
+pnpm test:integration    212 tests          (console 115, core 36, db 33, storefront 17, worker 11)
+```
+
+Unit **325 → 328**: core **279 → 282** (+3 from `inventory/index.test.ts`: `isLowStock`,
+`firstMovementProjection`, and the oversell race mapping to 409 — commit `ed00d4a` + `8aac626`).
+Integrations unchanged (46).
+
+Integration **191 → 212** (+21): db **32 → 33** (+1, new `inventory-ledger.test.ts`
+covering the upsert-based stock_levels write, the CHECK (on_hand >= 0) oversell block,
+and ledger row locking — commit `752d039`); core **25 → 36** (+11, not the +10 estimated:
+new `inventory-movements.integration.test.ts` with the end-to-end movement write including
+tenant visibility, permission gates, untracked refusal, oversell refusal, the opening-balance
+reason mapping, idempotent replay, concurrent writes staying atomic, and zero ledger rows
+surviving any validation failure — commits `ed00d4a` + `8aac626`); console **107 → 115**
+(+8, not the +9 estimated: new `inventory-movements.integration.test.ts` covering the
+POST route with auth/authz gates, validation, the 422 oversell refusal, atomicity with
+purge, and the identical zero-ledger guarantee — commits `b2cb7b9` + `5e0e0ca`); storefront
+**16 → 17** (+1, PDP tracking/availability test — commit `a4c42c2`); worker unchanged (11).
+
+Live pass on production builds (console 3001, storefront 3010): enabled tracking on one
+variant of a three-variant product → inventory panel showed 0 on-hand, PDP showed
+`OutOfStock`; adjusted +5 with note "opening count" → `/inventory` listed the variant at 5,
+PDP flipped to `InStock` **immediately** (purge working); adjusted -6 with note "sold at
+exhibition" → PDP flipped to `OutOfStock` immediately, history page showed three movements
+newest-first with notes and staff name; `/inventory?low=1` listed the variant with 0 on-hand
+(0 ≤ default threshold 2). Immediate PDP flip in both directions verified.
+
+**Live-pass limitations:**
+- **Step 8 not verified live:** the untracked-variants-render-unchanged path was not exercised
+  because the `PUT /api/products/{id}` route's whole-set replace semantics made the attempted
+  partial payload soft-delete the other variants. This path is covered by Task 6's storefront
+  integration test (`tracking-availability.integration.test.ts`) instead.
+- **Session-cookie workaround required:** local production-build verification required temporarily
+  bypassing the `__Host-` cookie's HTTPS requirement in `apps/console/src/lib/session.ts`
+  (forced `isProd = false`), reverted before commit — the working tree carries no trace.
+- **lowStockAt NULL on tracking enable:** enabling tracking via the console/API leaves
+  `low_stock_at` NULL (the zod default is null; the column's DEFAULT 2 only fires on raw INSERTs
+  that omit the column). NULL threshold = never low, so the `/inventory?low=1` verification
+  required manually setting the threshold via SQL first (`UPDATE product_variants SET
+  low_stock_at = 2 WHERE id = '...'`).
 
 ---
 
@@ -595,6 +644,15 @@ If the database volume survived, the two demo tenants are still seeded. If not:
   the report saying so (`ImportReport` holds counts and per-row issues,
   not a field-level diff). "Cleared" is harmless for `barcode`; here it
   meant "buyable".
+- **History tables must not FK their subjects with RESTRICT.** Tenant
+  deletion cascades to variants and locations in unspecified order, so a
+  RESTRICT FK from `stock_movements` would fail the cascade mid-flight —
+  which is every test suite's cleanup. Ledger and audit rows reference by
+  bare uuid (the audit_log precedent); write-time integrity comes from
+  the visibility SELECT inside the one write door. And `stock_levels`'
+  CHECK (on_hand >= 0) plus same-transaction upsert is what makes
+  oversell impossible under concurrency — do not "optimise" the write
+  into read-then-write.
 
 ---
 
@@ -608,7 +666,7 @@ If the database volume survived, the two demo tenants are still seeded. If not:
 | Ekart partner agreement | API docs and credentials are gated behind a Flipkart commercial agreement | Unknown |
 | Run this on a real VPS | Local dry run verified (see `docs/DEPLOYMENT.md` for the runbook). What remains: domain + TLS (Let's Encrypt via Cloudflare DNS), R2/S3 storage (replace MinIO), OTP provider (Phase 4 blocker), backups, external monitoring | VPS setup + domain + R2 configuration |
 | ~~Storefront cache purge — blocked on a Next defect~~ | **Closed by Task 8**: both apps are on Next 16.3.0, where the tag manifest is written unconditionally. Verified live — three consecutive console writes on the same tenant each appeared on the storefront within a second, with the 300s TTL never waited on. The remaining limitation is unchanged and is a deployment fact, not a bug: one purge reaches ONE storefront process, so more than one replica needs a load balancer that fans the purge out, or a shared cache handler | Done |
-| Stock levels | The console can set a variant's SKU, price and low-stock threshold but not its quantity — there is no `stock_movements` table yet. The inventory ledger is Phase 2 (blueprint §4.5), and a mutable counter would be the wrong thing to add early | Phase 2 |
+| Stock levels | Ledger shipped — `stock_movements` + `stock_levels` + opt-in `tracks_inventory`, console adjust/history, PDP sold-out. Remaining: reservations (checkout task), bulk opening balances via CSV (designed follow-up). Note: enabling tracking does not seed a low-stock threshold; the merchant sets `lowStockAt` explicitly — deferred polish | Phase 2 |
 
 ---
 
