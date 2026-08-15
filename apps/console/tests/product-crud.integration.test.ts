@@ -1703,3 +1703,71 @@ describe("console catalog queries", () => {
     expect(library.find((m) => m.id === pendingMediaId)!.status).toBe("pending");
   });
 });
+
+/**
+ * Tracked variants always carry a low-stock threshold. Null means "never
+ * low", so a tracked variant saved without a threshold would be invisible
+ * to /inventory?low=1 — including one sitting at zero. The write layer
+ * seeds DEFAULT_LOW_STOCK_AT on tracked variants with a blank threshold;
+ * untracked variants keep the null (owner decision, 2026-08-15).
+ */
+describe("low-stock threshold seeding", () => {
+  async function variantRow(
+    productId: string,
+  ): Promise<{ low_stock_at: number | null; tracks_inventory: boolean }> {
+    const [row] = await admin<{ low_stock_at: number | null; tracks_inventory: boolean }[]>`
+      SELECT low_stock_at, tracks_inventory FROM product_variants
+      WHERE product_id = ${productId} AND deleted_at IS NULL`;
+    return row!;
+  }
+
+  it("a tracked variant saved with a blank threshold gets the default", async () => {
+    sessionToken = ownerToken;
+    const { status, data } = await createProduct(
+      productPayload({
+        variants: [
+          {
+            sku: `LS-${randomUUID().slice(0, 8)}`,
+            price: "100",
+            weightGrams: 200,
+            tracksInventory: true,
+          },
+        ],
+      }),
+    );
+    expect(status).toBe(201);
+    const row = await variantRow(data.productId as string);
+    expect(row.tracks_inventory).toBe(true);
+    expect(row.low_stock_at).toBe(2);
+  });
+
+  it("an untracked variant with a blank threshold stays unthresholded", async () => {
+    sessionToken = ownerToken;
+    const { status, data } = await createProduct(
+      productPayload({
+        variants: [{ sku: `LS-${randomUUID().slice(0, 8)}`, price: "100", weightGrams: 200 }],
+      }),
+    );
+    expect(status).toBe(201);
+    expect((await variantRow(data.productId as string)).low_stock_at).toBeNull();
+  });
+
+  it("an explicit threshold on a tracked variant is respected, not overwritten", async () => {
+    sessionToken = ownerToken;
+    const { status, data } = await createProduct(
+      productPayload({
+        variants: [
+          {
+            sku: `LS-${randomUUID().slice(0, 8)}`,
+            price: "100",
+            weightGrams: 200,
+            tracksInventory: true,
+            lowStockAt: 7,
+          },
+        ],
+      }),
+    );
+    expect(status).toBe(201);
+    expect((await variantRow(data.productId as string)).low_stock_at).toBe(7);
+  });
+});

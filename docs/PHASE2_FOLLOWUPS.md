@@ -7,14 +7,14 @@ re-diagnosing anything on it.
 
 ## Deferred from the inventory ledger
 
-- **Enabling tracking does not seed a low-stock threshold.** The console's
-  zod default for `lowStockAt` is `null`, and the column's `DEFAULT 2` only
-  fires on INSERTs that omit the column — so every console-created tracked
-  variant has a null threshold, and null means *never low*. `/inventory?low=1`
-  silently misses those variants, including one sitting at 0. Product
-  decision pending: auto-seed a threshold when tracking flips on, or keep
-  it explicit and surface the threshold in the adjust dialog. Decide before
-  the next inventory-adjacent task.
+- ~~**Enabling tracking does not seed a low-stock threshold.**~~ **Resolved
+  2026-08-15** (owner decision: tracked variants must surface in low stock).
+  The write layer seeds `DEFAULT_LOW_STOCK_AT` (2, `@platform/core/inventory`)
+  whenever a variant is saved tracked with a blank threshold — uniformly on
+  every save, so "tracked but never-low" is deliberately inexpressible (the
+  closest is a threshold of 0: low only at zero). Migration
+  `0006_low_stock_backfill` fixed pre-existing rows; pinned by three tests in
+  `apps/console/tests/product-crud.integration.test.ts`.
 - **The rendered PDP sold-out state is untested.** The storefront
   integration test covers the query layer (`available` on `ProductDetail`)
   and the JSON-LD purity; VariantPicker's filter and "Out of stock." message

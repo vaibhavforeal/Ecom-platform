@@ -361,7 +361,12 @@ the variant with 0 on-hand (0 ≤ default threshold 2). Immediate PDP flip in bo
   `low_stock_at` NULL (the zod default is null; the column's DEFAULT 2 only fires on raw INSERTs
   that omit the column). NULL threshold = never low, so the `/inventory?low=1` verification
   required manually setting the threshold via SQL first (`UPDATE product_variants SET
-  low_stock_at = 2 WHERE id = '...'`).
+  low_stock_at = 2 WHERE id = '...'`). **Resolved the same day** (owner decision): the
+  catalog write layer now seeds `DEFAULT_LOW_STOCK_AT` (2, `@platform/core/inventory`)
+  onto any variant saved tracked with a blank threshold — on every save, so tracked
+  variants cannot be "never low" — and migration `0006_low_stock_backfill` updated the
+  rows that predated the rule. Pinned by three tests in
+  `apps/console/tests/product-crud.integration.test.ts` (console integration 115 → 118).
 
 ---
 

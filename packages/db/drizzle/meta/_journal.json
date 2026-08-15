@@ -43,6 +43,13 @@
       "when": 1786771182703,
       "tag": "0005_dashing_rogue",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1786784528652,
+      "tag": "0006_low_stock_backfill",
+      "breakpoints": true
     }
   ]
 }

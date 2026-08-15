@@ -21,6 +21,7 @@ import type { ProductStatus, SlugEntityType, Tx } from "@platform/db";
 
 import { recordAudit } from "../audit/index";
 import { AppError } from "../errors";
+import { DEFAULT_LOW_STOCK_AT } from "../inventory/index";
 import { catalogPurgeTags } from "./cache-tags";
 import { isDescendant } from "./categories";
 import { validateVariantMatrix } from "./options";
@@ -562,7 +563,13 @@ async function writeVariants(
       compareAtPaise: variant.compareAtPaise,
       costPaise: variant.costPaise,
       weightGrams: variant.weightGrams,
-      lowStockAt: variant.lowStockAt,
+      // A tracked variant always carries a threshold: null means "never
+      // low", which would hide it from /inventory?low=1 even at zero.
+      // Applies on every save, so tracked variants cannot be "never low"
+      // by leaving the box blank — that is the point, not an accident.
+      lowStockAt: variant.tracksInventory
+        ? (variant.lowStockAt ?? DEFAULT_LOW_STOCK_AT)
+        : variant.lowStockAt,
       tracksInventory: variant.tracksInventory,
       imageMediaId: variant.imageMediaId,
       isActive: variant.isActive,
