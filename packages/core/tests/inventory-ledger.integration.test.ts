@@ -34,6 +34,7 @@ let trackedVariant: string;
 let untrackedVariant: string;
 let otherTenantVariant: string;
 let raceVariant: string;
+let heldVariant: string;
 
 const createdTenants = new Set<string>();
 const createdUsers = new Set<string>();
@@ -79,6 +80,22 @@ async function movementCount(variantId: string): Promise<number> {
   return row!.n;
 }
 
+async function insertHold(
+  variantId: string,
+  quantity: number,
+  expiresOffsetSeconds: number,
+): Promise<string> {
+  const referenceId = randomUUID();
+  const [loc] = await admin<{ id: string }[]>`
+    SELECT id FROM locations WHERE tenant_id = ${tenantA} AND is_default`;
+  await admin`
+    INSERT INTO stock_reservations
+      (id, tenant_id, variant_id, location_id, quantity, reference_type, reference_id, expires_at)
+    VALUES (${randomUUID()}, ${tenantA}, ${variantId}, ${loc!.id}, ${quantity},
+            'checkout', ${referenceId}, now() + make_interval(secs => ${expiresOffsetSeconds}))`;
+  return referenceId;
+}
+
 beforeAll(async () => {
   tenantA = await makeTenant();
   tenantB = await makeTenant();
@@ -91,6 +108,7 @@ beforeAll(async () => {
   untrackedVariant = await makeVariant(tenantA, false);
   raceVariant = await makeVariant(tenantA, true);
   otherTenantVariant = await makeVariant(tenantB, true);
+  heldVariant = await makeVariant(tenantA, true);
 });
 
 afterAll(async () => {
@@ -312,6 +330,42 @@ describe("recordMovement", () => {
     const levels = await withTenant(tenantA, (tx) => getStockLevels(tx, [freshVariant]));
     const successDelta = (fulfilled[0] as PromiseFulfilledResult<{ delta: number }>).value.delta;
     expect(levels.get(freshVariant)).toBe(successDelta);
+  });
+});
+
+describe("recordMovement vs active holds", () => {
+  it("a negative adjustment below active holds is refused with stock_held, atomically", async () => {
+    await recordMovement(ctx(tenantA), { variantId: heldVariant, delta: 5, note: "opening" });
+    await insertHold(heldVariant, 3, 900); // active for 15 minutes
+
+    const before = await movementCount(heldVariant);
+    await expect(
+      recordMovement(ctx(tenantA), { variantId: heldVariant, delta: -3, note: "yank" }),
+    ).rejects.toMatchObject({ code: "stock_held", status: 422 });
+    expect(await movementCount(heldVariant)).toBe(before);
+    expect(await reconcileStockLevels(tenantA)).toEqual([]);
+  });
+
+  it("an adjustment that leaves exactly the held quantity is allowed", async () => {
+    // on-hand 5, held 3: dropping to 3 is legal (3 is not below 3).
+    const result = await recordMovement(ctx(tenantA), {
+      variantId: heldVariant,
+      delta: -2,
+      note: "boundary",
+    });
+    expect(result.onHand).toBe(3);
+  });
+
+  it("the refused adjustment succeeds once the hold has expired — with no other write", async () => {
+    await admin`
+      UPDATE stock_reservations SET expires_at = now() - interval '1 second'
+      WHERE variant_id = ${heldVariant}`;
+    const result = await recordMovement(ctx(tenantA), {
+      variantId: heldVariant,
+      delta: -3,
+      note: "recount",
+    });
+    expect(result.onHand).toBe(0);
   });
 });
 

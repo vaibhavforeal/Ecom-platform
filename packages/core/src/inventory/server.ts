@@ -11,6 +11,7 @@ import {
   sql,
   stockLevels,
   stockMovements,
+  stockReservations,
   users,
   withTenant,
 } from "@platform/db";
@@ -74,6 +75,22 @@ export class InsufficientStockError extends AppError {
       publicMessage: `That change would take stock below zero (on hand: ${onHand}).`,
       details: {
         issues: [{ path: "delta", message: `On hand is ${onHand}; stock cannot go below zero.` }],
+      },
+    });
+  }
+}
+
+export class StockHeldError extends AppError {
+  constructor(resultingOnHand: number, reserved: number, soonestExpiry: Date | null) {
+    super({
+      code: "stock_held",
+      message: `Movement refused: on-hand would be ${resultingOnHand} with ${reserved} held by active checkouts (soonest expiry ${soonestExpiry?.toISOString() ?? "unknown"})`,
+      status: 422,
+      publicMessage: `Buyers are checking out with ${reserved} of these right now; stock cannot drop below what is held. Holds expire within 15 minutes.`,
+      details: {
+        issues: [
+          { path: "delta", message: `${reserved} held by active checkouts — retry after the holds expire.` },
+        ],
       },
     });
   }
@@ -172,6 +189,109 @@ async function findByIdempotencyKey(
   };
 }
 
+type ApplyMovementArgs = {
+  tenantId: string;
+  variantId: string;
+  productId: string;
+  locationId: string;
+  delta: number;
+  reason: StockMovementReason;
+  note: string | null;
+  idempotencyKey: string | null;
+  createdByUserId: string | null;
+  referenceType: string | null;
+  referenceId: string | null;
+};
+
+/**
+ * The ledger insert + projection write, inside the CALLER's transaction.
+ * Shared by recordMovement (adjustments) and consumeStock (sales) — the
+ * only two writers. Throws raw Postgres errors (callers map them) and
+ * StockHeldError.
+ *
+ * Phase 5 assumption: one location per variant, so if a prior movement
+ * exists, the projection row exists. Phase 5 (multi-location) must revisit:
+ * the reason check is per-variant, the projection key per-(variant,location).
+ */
+async function applyMovement(
+  tx: Tx,
+  args: ApplyMovementArgs,
+): Promise<{ movementId: string; onHand: number }> {
+  const [movement] = await tx
+    .insert(stockMovements)
+    .values({
+      tenantId: args.tenantId,
+      variantId: args.variantId,
+      locationId: args.locationId,
+      delta: args.delta,
+      reason: args.reason,
+      note: args.note,
+      idempotencyKey: args.idempotencyKey,
+      createdByUserId: args.createdByUserId,
+      referenceType: args.referenceType,
+      referenceId: args.referenceId,
+    })
+    .returning({ id: stockMovements.id });
+
+  // Projection: UPDATE first, INSERT when no row exists yet. Branches on
+  // ROW EXISTENCE, not reason — with `sale` in the enum, "reason ===
+  // opening_balance" stopped meaning "first write". UPDATE-first also
+  // keeps negative values away from the CHECK-on-INSERT-tuple trap, and
+  // two concurrent first movements still collide on the projection PK
+  // (both see no row, both INSERT) — the caller maps that 23505 to 409.
+  let onHand: number;
+  const [updated] = await tx
+    .update(stockLevels)
+    .set({ onHand: sql`${stockLevels.onHand} + ${args.delta}`, updatedAt: new Date() })
+    .where(
+      and(
+        eq(stockLevels.tenantId, args.tenantId),
+        eq(stockLevels.variantId, args.variantId),
+        eq(stockLevels.locationId, args.locationId),
+      ),
+    )
+    .returning({ onHand: stockLevels.onHand });
+  if (updated) {
+    onHand = updated.onHand;
+  } else {
+    const [inserted] = await tx
+      .insert(stockLevels)
+      .values({
+        tenantId: args.tenantId,
+        variantId: args.variantId,
+        locationId: args.locationId,
+        onHand: args.delta,
+      })
+      .returning({ onHand: stockLevels.onHand });
+    onHand = inserted!.onHand;
+  }
+
+  // A negative movement must not take on-hand below what active
+  // checkouts hold — a buyer mid-payment must not lose their unit to an
+  // adjustment. consumeStock deletes its own hold row in this same
+  // transaction BEFORE calling here, so the sum already excludes it.
+  if (args.delta < 0) {
+    const [held] = await tx
+      .select({
+        reserved: sql<number>`coalesce(sum(${stockReservations.quantity}), 0)::int`.as("reserved"),
+        soonest: sql<string | null>`min(${stockReservations.expiresAt})::text`.as("soonest"),
+      })
+      .from(stockReservations)
+      .where(
+        and(
+          eq(stockReservations.variantId, args.variantId),
+          sql`${stockReservations.expiresAt} > now()`,
+        ),
+      );
+    const reserved = held?.reserved ?? 0;
+    if (onHand < reserved) {
+      throw new StockHeldError(onHand, reserved, held?.soonest ? new Date(held.soonest) : null);
+    }
+  }
+
+  return { movementId: movement!.id, onHand };
+}
+
 /**
  * Record one stock movement and keep the projection true, atomically.
  *
@@ -242,54 +362,19 @@ export async function recordMovement(
         .limit(1);
       const reason: StockMovementReason = prior ? "adjustment" : "opening_balance";
 
-      const [movement] = await tx
-        .insert(stockMovements)
-        .values({
-          tenantId: ctx.tenantId,
-          variantId: input.variantId,
-          locationId: location.id,
-          delta: input.delta,
-          reason,
-          note: input.note ?? null,
-          idempotencyKey: input.idempotencyKey ?? null,
-          createdByUserId: ctx.actorUserId,
-        })
-        .returning({ id: stockMovements.id });
-
-      // The projection upsert. For the first movement, INSERT. For subsequent,
-      // UPDATE to avoid CHECK evaluation on negative INSERT values.
-      let onHand: number;
-      if (reason === "opening_balance") {
-        const [level] = await tx
-          .insert(stockLevels)
-          .values({
-            tenantId: ctx.tenantId,
-            variantId: input.variantId,
-            locationId: location.id,
-            onHand: input.delta,
-          })
-          .returning({ onHand: stockLevels.onHand });
-        onHand = level!.onHand;
-      } else {
-        const [level] = await tx
-          .update(stockLevels)
-          .set({
-            onHand: sql`${stockLevels.onHand} + ${input.delta}`,
-            updatedAt: new Date(),
-          })
-          .where(
-            and(
-              eq(stockLevels.tenantId, ctx.tenantId),
-              eq(stockLevels.variantId, input.variantId),
-              eq(stockLevels.locationId, location.id),
-            ),
-          )
-          .returning({ onHand: stockLevels.onHand });
-        // Phase 1 assumption: one location per variant, so if a prior movement
-        // exists, the projection row exists. Phase 5 (multi-location) must revisit:
-        // the reason check is per-variant, the projection key per-(variant,location).
-        onHand = level!.onHand;
-      }
+      const { movementId, onHand } = await applyMovement(tx, {
+        tenantId: ctx.tenantId,
+        variantId: input.variantId,
+        productId: variant.productId,
+        locationId: location.id,
+        delta: input.delta,
+        reason,
+        note: input.note ?? null,
+        idempotencyKey: input.idempotencyKey ?? null,
+        createdByUserId: ctx.actorUserId,
+        referenceType: null,
+        referenceId: null,
+      });
 
       await recordAudit(tx, ctx.tenantId, {
         actorType: "staff",
@@ -305,7 +390,7 @@ export async function recordMovement(
       });
 
       return {
-        movementId: movement!.id,
+        movementId,
         variantId: input.variantId,
         productId: variant.productId,
         reason,
