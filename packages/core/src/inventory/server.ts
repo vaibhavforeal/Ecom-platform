@@ -22,7 +22,8 @@ import { catalogPurgeTags } from "../catalog/cache-tags";
 import { purgeStorefrontCache } from "../catalog/purge";
 import type { WriteContext } from "../catalog/writes";
 import { AppError } from "../errors";
-import { STOCK_ADJUSTMENT_MAX } from "./index";
+import { RESERVATION_TTL_MINUTES, STOCK_ADJUSTMENT_MAX } from "./index";
+import type { ConsumeLineResult, HoldLineInput, HoldLineResult, ReservationReference } from "./index";
 
 /**
  * The inventory ledger's single write door. SERVER ONLY.
@@ -642,4 +643,388 @@ export async function reconcileStockLevels(
     }
     return mismatches;
   });
+}
+
+/** Checkout has no staff actor — reservation entry points take this, not WriteContext. */
+export type ReservationContext = { tenantId: string; requestId?: string | null };
+
+export class InsufficientAvailabilityError extends AppError {
+  readonly failedLines: { variantId: string; requested: number; available: number }[];
+
+  constructor(lines: { variantId: string; requested: number; available: number }[]) {
+    super({
+      code: "insufficient_stock",
+      message: `Hold refused: ${lines
+        .map((l) => `${l.variantId} requested ${l.requested}, available ${l.available}`)
+        .join("; ")}`,
+      status: 422,
+      publicMessage: "Some items are no longer available in the quantity requested.",
+      details: {
+        issues: lines.map((l) => ({
+          path: l.variantId,
+          message: `Requested ${l.requested}, only ${l.available} available.`,
+        })),
+      },
+    });
+    this.failedLines = lines;
+  }
+}
+
+function validateLines(lines: HoldLineInput[]): void {
+  const refuse = (message: string): never => {
+    throw new AppError({
+      code: "invalid_payload",
+      message: `Reservation lines invalid: ${message}`,
+      status: 422,
+      publicMessage: "Some fields need attention.",
+      details: { issues: [{ path: "lines", message }] },
+    });
+  };
+  if (lines.length === 0) refuse("at least one line is required");
+  if (lines.length > 100) refuse("at most 100 lines per hold");
+  const seen = new Set<string>();
+  for (const line of lines) {
+    if (
+      !Number.isInteger(line.quantity) ||
+      line.quantity <= 0 ||
+      line.quantity > STOCK_ADJUSTMENT_MAX
+    ) {
+      refuse(`quantity for ${line.variantId} must be a positive whole number`);
+    }
+    if (seen.has(line.variantId)) refuse(`duplicate line for ${line.variantId}`);
+    seen.add(line.variantId);
+  }
+}
+
+/** Visibility + tracking lookup for every line; throws on any unknown id. */
+async function loadLineVariants(
+  tx: Tx,
+  variantIds: string[],
+): Promise<Map<string, { productId: string; tracksInventory: boolean }>> {
+  const rows = await tx
+    .select({
+      id: productVariants.id,
+      productId: productVariants.productId,
+      tracksInventory: productVariants.tracksInventory,
+    })
+    .from(productVariants)
+    .where(and(inArray(productVariants.id, variantIds), isNull(productVariants.deletedAt)));
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  for (const id of variantIds) {
+    if (!byId.has(id)) throw new VariantNotFoundError(id);
+  }
+  return byId;
+}
+
+/**
+ * Lock the tracked lines' stock_levels rows FOR UPDATE in SORTED
+ * variant-id order — the deadlock discipline for multi-line operations.
+ * A variant with no levels row has on-hand 0 and nothing to lock; every
+ * positive request against it simply fails the fit check.
+ */
+async function lockLevels(
+  tx: Tx,
+  locationId: string,
+  lines: HoldLineInput[],
+): Promise<Map<string, number>> {
+  const onHandBy = new Map<string, number>();
+  for (const line of [...lines].sort((a, b) => (a.variantId < b.variantId ? -1 : 1))) {
+    const [level] = await tx
+      .select({ onHand: stockLevels.onHand })
+      .from(stockLevels)
+      .where(
+        and(eq(stockLevels.variantId, line.variantId), eq(stockLevels.locationId, locationId)),
+      )
+      .for("update");
+    onHandBy.set(line.variantId, level?.onHand ?? 0);
+  }
+  return onHandBy;
+}
+
+/**
+ * Place (or replace) a reference's hold. All-or-nothing across the
+ * lines; re-holding the same reference replaces its set and refreshes
+ * the 15-minute window. Untracked lines are skipped — they cannot run
+ * out. See the spec's §2 for the full semantics.
+ */
+export async function holdStock(
+  ctx: ReservationContext,
+  input: { reference: ReservationReference; lines: HoldLineInput[] },
+): Promise<{ lines: HoldLineResult[]; expiresAt: Date }> {
+  validateLines(input.lines);
+  try {
+    return await withTenant(ctx.tenantId, async (tx) => {
+      const variants = await loadLineVariants(
+        tx,
+        input.lines.map((l) => l.variantId),
+      );
+      const location = await ensureDefaultLocation(tx, ctx.tenantId);
+
+      const tracked = input.lines.filter((l) => variants.get(l.variantId)!.tracksInventory);
+      const onHandBy = await lockLevels(tx, location.id, tracked);
+
+      // Replace semantics: this reference's previous set stops counting
+      // BEFORE the fit sums — a re-hold must not compete with itself.
+      // Deleting (not excluding in the sum) also covers lines the new
+      // set no longer carries.
+      await tx
+        .delete(stockReservations)
+        .where(
+          and(
+            eq(stockReservations.referenceType, input.reference.type),
+            eq(stockReservations.referenceId, input.reference.id),
+          ),
+        );
+
+      const failures: { variantId: string; requested: number; available: number }[] = [];
+      for (const line of tracked) {
+        // Free GC while we hold this variant's row lock.
+        await tx
+          .delete(stockReservations)
+          .where(
+            and(
+              eq(stockReservations.variantId, line.variantId),
+              sql`${stockReservations.expiresAt} <= now()`,
+            ),
+          );
+        const [held] = await tx
+          .select({
+            reserved: sql<number>`coalesce(sum(${stockReservations.quantity}), 0)::int`.as(
+              "reserved",
+            ),
+          })
+          .from(stockReservations)
+          .where(
+            and(
+              eq(stockReservations.variantId, line.variantId),
+              sql`${stockReservations.expiresAt} > now()`,
+            ),
+          );
+        const available = Math.max((onHandBy.get(line.variantId) ?? 0) - (held?.reserved ?? 0), 0);
+        if (line.quantity > available) {
+          failures.push({ variantId: line.variantId, requested: line.quantity, available });
+        }
+      }
+      if (failures.length > 0) throw new InsufficientAvailabilityError(failures);
+
+      // Informational fallback for an all-untracked hold; rows get the
+      // authoritative Postgres now() + TTL.
+      let expiresAt = new Date(Date.now() + RESERVATION_TTL_MINUTES * 60_000);
+      if (tracked.length > 0) {
+        const inserted = await tx
+          .insert(stockReservations)
+          .values(
+            tracked.map((line) => ({
+              tenantId: ctx.tenantId,
+              variantId: line.variantId,
+              locationId: location.id,
+              quantity: line.quantity,
+              referenceType: input.reference.type,
+              referenceId: input.reference.id,
+              expiresAt: sql`now() + make_interval(mins => ${RESERVATION_TTL_MINUTES})`,
+            })),
+          )
+          .returning({ expiresAt: stockReservations.expiresAt });
+        expiresAt = inserted[0]!.expiresAt;
+      }
+
+      return {
+        lines: input.lines.map((line) => ({
+          variantId: line.variantId,
+          quantity: line.quantity,
+          status: variants.get(line.variantId)!.tracksInventory
+            ? ("held" as const)
+            : ("untracked" as const),
+        })),
+        expiresAt,
+      };
+    });
+  } catch (err) {
+    const pg = pgError(err);
+    // Two CONCURRENT holds for one reference: both replaced the old set,
+    // both inserted, the loser hits the unique index. Retryable.
+    if (pg.code === "23505" && pg.text.includes("stock_reservations_ref_variant_key")) {
+      throw new AppError({
+        code: "concurrent_modification",
+        message: "Another hold for this reference landed concurrently",
+        status: 409,
+        publicMessage: "Your checkout was updated at the same time. Please retry.",
+      });
+    }
+    throw err;
+  }
+}
+
+/** Drop a reference's holds. Idempotent — releasing nothing is fine. */
+export async function releaseStock(
+  ctx: ReservationContext,
+  reference: ReservationReference,
+): Promise<{ released: number }> {
+  return withTenant(ctx.tenantId, async (tx) => {
+    const deleted = await tx
+      .delete(stockReservations)
+      .where(
+        and(
+          eq(stockReservations.referenceType, reference.type),
+          eq(stockReservations.referenceId, reference.id),
+        ),
+      )
+      .returning({ id: stockReservations.id });
+    return { released: deleted.length };
+  });
+}
+
+/**
+ * Turn a reference's hold into sale movements, atomically. Lines come
+ * from the CALLER (the order being created is the authority) — never
+ * from the hold rows, which GC may erase mid-payment. Per line the hold
+ * row is deleted FIRST, so applyMovement's stock_held guard no longer
+ * counts it; if the stock is genuinely gone the on_hand CHECK refuses
+ * and the WHOLE consume rolls back (zero sale movements survive).
+ */
+export async function consumeStock(
+  ctx: ReservationContext,
+  input: { reference: ReservationReference; lines: HoldLineInput[] },
+): Promise<{ lines: ConsumeLineResult[] }> {
+  validateLines(input.lines);
+  let currentLine: HoldLineInput | null = null;
+  let outcome: { lines: ConsumeLineResult[]; productIds: string[] };
+  try {
+    outcome = await withTenant(ctx.tenantId, async (tx) => {
+      const variants = await loadLineVariants(
+        tx,
+        input.lines.map((l) => l.variantId),
+      );
+      const location = await ensureDefaultLocation(tx, ctx.tenantId);
+
+      const tracked = input.lines
+        .filter((l) => variants.get(l.variantId)!.tracksInventory)
+        .sort((a, b) => (a.variantId < b.variantId ? -1 : 1));
+      await lockLevels(tx, location.id, tracked);
+
+      const results = new Map<string, ConsumeLineResult>();
+      for (const line of input.lines) {
+        if (!variants.get(line.variantId)!.tracksInventory) {
+          results.set(line.variantId, {
+            variantId: line.variantId,
+            quantity: line.quantity,
+            status: "untracked",
+          });
+        }
+      }
+
+      for (const line of tracked) {
+        currentLine = line;
+        const deleted = await tx
+          .delete(stockReservations)
+          .where(
+            and(
+              eq(stockReservations.referenceType, input.reference.type),
+              eq(stockReservations.referenceId, input.reference.id),
+              eq(stockReservations.variantId, line.variantId),
+            ),
+          )
+          .returning({ expiresAt: stockReservations.expiresAt });
+        // Informational only (app-clock comparison): "held" means the
+        // buyer's guarantee was still standing when payment confirmed.
+        const wasHeld = deleted.length > 0 && deleted[0]!.expiresAt.getTime() > Date.now();
+
+        const applied = await applyMovement(tx, {
+          tenantId: ctx.tenantId,
+          variantId: line.variantId,
+          productId: variants.get(line.variantId)!.productId,
+          locationId: location.id,
+          delta: -line.quantity,
+          reason: "sale",
+          note: null,
+          idempotencyKey: null,
+          createdByUserId: null,
+          referenceType: input.reference.type,
+          referenceId: input.reference.id,
+        });
+        results.set(line.variantId, {
+          variantId: line.variantId,
+          quantity: line.quantity,
+          status: wasHeld ? "held" : "unheld",
+          movementId: applied.movementId,
+        });
+      }
+      currentLine = null;
+
+      // Lines the order no longer carries: released — the order is the
+      // authority on what was bought.
+      await tx
+        .delete(stockReservations)
+        .where(
+          and(
+            eq(stockReservations.referenceType, input.reference.type),
+            eq(stockReservations.referenceId, input.reference.id),
+          ),
+        );
+
+      return {
+        lines: input.lines.map((l) => results.get(l.variantId)!),
+        productIds: [...new Set(tracked.map((l) => variants.get(l.variantId)!.productId))],
+      };
+    });
+  } catch (err) {
+    const pg = pgError(err);
+    // The stolen path: an expired hold lost its unit to someone else.
+    if (pg.code === "23514" && pg.text.includes("stock_levels_on_hand_check") && currentLine) {
+      const line: HoldLineInput = currentLine;
+      const available = await withTenant(ctx.tenantId, async (tx) => {
+        const map = await getAvailability(tx, [line.variantId]);
+        return map.get(line.variantId)?.available ?? 0;
+      });
+      throw new InsufficientAvailabilityError([
+        { variantId: line.variantId, requested: line.quantity, available },
+      ]);
+    }
+    throw err; // StockHeldError and everything else pass through intact
+  }
+
+  // After the commit, never inside it. Fail-soft. One purge for all
+  // affected products.
+  if (outcome.productIds.length > 0) {
+    await purgeStorefrontCache(ctx.tenantId, catalogPurgeTags(ctx.tenantId, outcome.productIds));
+  }
+  return { lines: outcome.lines };
+}
+
+export type Availability = { onHand: number; reserved: number; available: number };
+
+/**
+ * on-hand, active-hold sum, and their clamped difference, per variant.
+ * EVERY requested id gets an entry (unlike getStockLevels) — callers
+ * need no ?? fallback. The PDP reads `available`; movement results and
+ * the console product panel keep reading raw on-hand.
+ */
+export async function getAvailability(
+  tx: Tx,
+  variantIds: string[],
+): Promise<Map<string, Availability>> {
+  if (variantIds.length === 0) return new Map();
+  const onHand = await getStockLevels(tx, variantIds);
+  const reservedRows = await tx
+    .select({
+      variantId: stockReservations.variantId,
+      reserved: sql<number>`coalesce(sum(${stockReservations.quantity}), 0)::int`.as("reserved"),
+    })
+    .from(stockReservations)
+    .where(
+      and(
+        inArray(stockReservations.variantId, variantIds),
+        sql`${stockReservations.expiresAt} > now()`,
+      ),
+    )
+    .groupBy(stockReservations.variantId);
+  const reservedBy = new Map(reservedRows.map((r) => [r.variantId, r.reserved]));
+
+  const map = new Map<string, Availability>();
+  for (const id of variantIds) {
+    const on = onHand.get(id) ?? 0;
+    const reserved = reservedBy.get(id) ?? 0;
+    map.set(id, { onHand: on, reserved, available: Math.max(on - reserved, 0) });
+  }
+  return map;
 }
