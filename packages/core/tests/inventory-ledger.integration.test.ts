@@ -237,7 +237,7 @@ describe("recordMovement", () => {
 
     // On-hand matches the successful movement
     const levels = await withTenant(tenantA, (tx) => getStockLevels(tx, [freshVariant]));
-    const successDelta = (fulfilled[0] as PromiseFulfilledResult<any>).value.delta;
+    const successDelta = (fulfilled[0] as PromiseFulfilledResult<{ delta: number }>).value.delta;
     expect(levels.get(freshVariant)).toBe(successDelta);
   });
 });

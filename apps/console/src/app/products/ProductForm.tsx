@@ -243,6 +243,7 @@ export function ProductForm({
         weightGrams: v.weightGrams.trim() === "" ? null : Number(v.weightGrams),
         lowStockAt: v.lowStockAt.trim() === "" ? null : Number(v.lowStockAt),
         imageMediaId: v.imageMediaId || null,
+        tracksInventory: v.tracksInventory,
         isActive: v.isActive,
       })),
       categoryIds: form.categoryIds,
@@ -482,6 +483,7 @@ export function ProductForm({
               <th>Was ₹</th>
               <th>Weight g</th>
               <th>Image</th>
+              <th>Tracked</th>
               <th>Live</th>
               <th />
             </tr>
@@ -546,6 +548,16 @@ export function ProductForm({
                 <td>
                   <input
                     type="checkbox"
+                    aria-label={`Variant ${index + 1} tracks inventory`}
+                    checked={variant.tracksInventory}
+                    onChange={(e) =>
+                      updateVariant(variant.key, { tracksInventory: e.target.checked })
+                    }
+                  />
+                </td>
+                <td>
+                  <input
+                    type="checkbox"
                     aria-label={`Variant ${index + 1} is for sale`}
                     checked={variant.isActive}
                     onChange={(e) => updateVariant(variant.key, { isActive: e.target.checked })}
@@ -579,9 +591,9 @@ export function ProductForm({
           Add variant
         </button>
         <p className="muted">
-          Stock levels are not here. The catalog does not model them yet — availability arrives
-          with the inventory ledger in Phase 2, and a number that looked like stock but was not
-          tracked would be worse than none.
+          Tracked variants carry a stock count in the ledger — manage quantities from the
+          Inventory page or the panel below. A variant tracked at zero shows as out of stock
+          on the storefront; untracked variants are always available.
         </p>
       </div>
 

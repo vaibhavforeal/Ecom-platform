@@ -174,13 +174,14 @@ describe("what a cell may say", () => {
     "tags",
     "tax_rate_percent",
     "variant_active",
+    "variant_tracks_inventory",
   ];
 
   function parse(...rows: string[][]) {
     return parseCatalogCsv([header, ...rows]);
   }
 
-  const base = ["tee", "Tee", "TEE-1", "10", "100", "", "", "", "", "", ""];
+  const base = ["tee", "Tee", "TEE-1", "10", "100", "", "", "", "", "", "", ""];
 
   function withCell(column: string, value: string): string[] {
     const row = [...base];
@@ -278,6 +279,21 @@ describe("what a cell may say", () => {
 
     // …and a populated cell still states something.
     expect(parse(withCell("variant_active", "false")).products[0]!.variants[0]!.isActive).toBe(false);
+  });
+
+  it("leaves variant_tracks_inventory UNDEFINED when the cell is blank, so tracked variants stay tracked", () => {
+    // The column is present and the cell is empty. If this came back
+    // `false`, `mergeVariant` would take it as a concrete instruction and
+    // never consult the stored value — disabling tracking for a variant
+    // the merchant had turned on in the console, with nothing in the
+    // report saying so. Blank states nothing, exactly as it does for
+    // every product column.
+    const { products, issues } = parse(withCell("variant_tracks_inventory", ""));
+    expect(issues).toEqual([]);
+    expect(products[0]!.variants[0]!.tracksInventory).toBeUndefined();
+
+    // …and a populated cell still states something.
+    expect(parse(withCell("variant_tracks_inventory", "true")).products[0]!.variants[0]!.tracksInventory).toBe(true);
   });
 
   it("distinguishes a column that is absent from one that is blank", () => {
@@ -433,9 +449,9 @@ describe("serialising", () => {
       "handle,title,status,summary,description,product_type,vendor,tags,hsn_code," +
         "tax_rate_percent,seo_title,seo_description,seo_noindex," +
         "option1_name,option1_value,option2_name,option2_value,option3_name,option3_value," +
-        "sku,barcode,price,compare_at_price,cost,weight_grams,low_stock_at,variant_active\r\n",
+        "sku,barcode,price,compare_at_price,cost,weight_grams,low_stock_at,variant_active,variant_tracks_inventory\r\n",
     );
-    expect(CSV_COLUMNS).toHaveLength(27);
+    expect(CSV_COLUMNS).toHaveLength(28);
     expect(REQUIRED_CSV_COLUMNS).toEqual(["handle", "title", "sku", "price", "weight_grams"]);
   });
 
@@ -463,6 +479,7 @@ describe("serialising", () => {
           costPaise: null,
           weightGrams: 180,
           lowStockAt: 2,
+          tracksInventory: true,
           isActive: true,
         },
         {
@@ -474,6 +491,7 @@ describe("serialising", () => {
           costPaise: null,
           weightGrams: 190,
           lowStockAt: null,
+          tracksInventory: false,
           isActive: false,
         },
       ],
@@ -503,6 +521,8 @@ describe("serialising", () => {
     expect(at(first, "tags")).toBe("cotton, tee");
     expect(at(first, "variant_active")).toBe("true");
     expect(at(second, "variant_active")).toBe("false");
+    expect(at(first, "variant_tracks_inventory")).toBe("true");
+    expect(at(second, "variant_tracks_inventory")).toBe("false");
     expect(at(second, "low_stock_at")).toBe("");
   });
 
@@ -530,6 +550,7 @@ describe("serialising", () => {
           costPaise: 100000,
           weightGrams: 250,
           lowStockAt: 3,
+          tracksInventory: true,
           isActive: true,
         },
       ],
@@ -564,6 +585,7 @@ describe("serialising", () => {
         costPaise: 100000,
         weightGrams: 250,
         lowStockAt: 3,
+        tracksInventory: true,
         isActive: true,
       },
     ]);

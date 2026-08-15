@@ -318,7 +318,7 @@ describe("the round trip — export, re-import, and nothing happens", () => {
     // against. Same reason, same wording, as the unit test in
     // `packages/core/tests/catalog-csv.test.ts`.
     expect(text.slice(1)).toMatch(
-      /^handle,title,status,summary,description,product_type,vendor,tags,hsn_code,tax_rate_percent,seo_title,seo_description,seo_noindex,option1_name,option1_value,option2_name,option2_value,option3_name,option3_value,sku,barcode,price,compare_at_price,cost,weight_grams,low_stock_at,variant_active\r\n/,
+      /^handle,title,status,summary,description,product_type,vendor,tags,hsn_code,tax_rate_percent,seo_title,seo_description,seo_noindex,option1_name,option1_value,option2_name,option2_value,option3_name,option3_value,sku,barcode,price,compare_at_price,cost,weight_grams,low_stock_at,variant_active,variant_tracks_inventory\r\n/,
     );
 
     // Three variants across two products, and no header repetition.
@@ -569,9 +569,9 @@ describe("what an import actually changes", () => {
     // which is what a merchant editing a subset of columns produces. The
     // price differs, so this is a real update rather than a skip.
     const csv =
-      "handle,title,option1_name,option1_value,sku,price,weight_grams,variant_active\r\n" +
-      "off-switch,Off Switch,Size,S,OS-S,600,100,\r\n" +
-      "off-switch,Off Switch,Size,M,OS-M,600,110,\r\n";
+      "handle,title,option1_name,option1_value,sku,price,weight_grams,variant_active,variant_tracks_inventory\r\n" +
+      "off-switch,Off Switch,Size,S,OS-S,600,100,,\r\n" +
+      "off-switch,Off Switch,Size,M,OS-M,600,110,,\r\n";
 
     const { report } = await importCsv(csv, { commit: true });
     expect(report!.updated).toBe(1);

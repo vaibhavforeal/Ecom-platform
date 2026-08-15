@@ -502,6 +502,7 @@ function mergeVariant(row: CsvVariantDraft, existing: ConsoleVariant | null): Va
     costPaise: pick(row.costPaise, existing?.costPaise ?? null),
     weightGrams: row.weightGrams,
     lowStockAt: pick(row.lowStockAt, existing?.lowStockAt ?? null),
+    tracksInventory: row.tracksInventory ?? existing?.tracksInventory ?? false,
     imageMediaId: existing?.imageMediaId ?? null,
     isActive: row.isActive ?? existing?.isActive ?? true,
   };
@@ -518,6 +519,7 @@ function retainVariant(v: ConsoleVariant): VariantInput {
     costPaise: v.costPaise,
     weightGrams: v.weightGrams,
     lowStockAt: v.lowStockAt,
+    tracksInventory: v.tracksInventory,
     imageMediaId: v.imageMediaId,
     isActive: v.isActive,
   };
@@ -642,6 +644,7 @@ function changedFields(input: ProductWriteInput, existing: ConsoleProduct): stri
         variant.costPaise !== stored.costPaise ||
         variant.weightGrams !== stored.weightGrams ||
         variant.lowStockAt !== stored.lowStockAt ||
+        variant.tracksInventory !== stored.tracksInventory ||
         variant.imageMediaId !== stored.imageMediaId ||
         variant.isActive !== stored.isActive
       ) {
@@ -795,6 +798,7 @@ export async function* exportCatalogCsv(tenantId: string): AsyncGenerator<string
           costPaise: v.costPaise,
           weightGrams: v.weightGrams,
           lowStockAt: v.lowStockAt,
+          tracksInventory: v.tracksInventory,
           isActive: v.isActive,
         })),
       });
