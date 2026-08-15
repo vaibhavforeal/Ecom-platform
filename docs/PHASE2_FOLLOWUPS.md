@@ -35,8 +35,8 @@ re-diagnosing anything on it.
 - **No explicit `changedFields` flip test for `tracks_inventory`** — the
   comparison clause exists (`bulk.ts`), the merge-level tests pin the
   dangerous direction; residual risk is a cosmetic dry-run-report omission.
-- **0005 migration file lacks a trailing newline** — drizzle-kit artifact,
-  cosmetic.
+- **Migrations 0005 and 0007 lack trailing newlines** — drizzle-kit
+  artifact, cosmetic.
 
 ## Designed follow-up tasks (from the spec, not defects)
 
@@ -49,7 +49,10 @@ re-diagnosing anything on it.
   (`SUM(quantity) WHERE expires_at > now()`), matching the blueprint's formula
   §4.3. The console does not purge on hold churn (deliberate, spec §4). Low-stock
   stays keyed on on-hand (the availability projection isn't carried into
-  `stock_levels` — revisit if merchants misread the badge).
+  `stock_levels` — revisit if merchants misread the badge). **Checkout consumer
+  must handle both failure codes:** `consumeStock` can fail with `insufficient_stock`
+  (stock gone) or `stock_held` (other references hold the remainder); `stock_held`'s
+  message/path is adjustment-shaped — revisit the message when checkout lands.
 - **CSV quantity / bulk opening balances** — absolute-quantity-to-delta
   semantics against the append-only ledger; the dry-run preview and
   idempotency need their own design pass.

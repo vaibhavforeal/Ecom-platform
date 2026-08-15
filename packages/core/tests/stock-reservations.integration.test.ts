@@ -377,6 +377,8 @@ describe("consumeStock", () => {
     const history = await getMovements(tenantA, vSell);
     expect(history[0]!.reason).toBe("sale");
     expect(history[0]!.createdByName).toBeNull();
+    expect(history[0]!.referenceType).toBe("checkout");
+    expect(history[0]!.referenceId).toBe(reference.id);
 
     expect(received.length).toBe(1);
     expect(received[0]!.tenantId).toBe(tenantA);

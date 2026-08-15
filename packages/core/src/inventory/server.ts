@@ -585,6 +585,8 @@ export type MovementRow = {
   note: string | null;
   createdAt: Date;
   createdByName: string | null;
+  referenceType: string | null;
+  referenceId: string | null;
 };
 
 /** A variant's movement history, newest first. `users` is control-plane (no RLS), so the join resolves. */
@@ -603,6 +605,8 @@ export async function getMovements(
         note: stockMovements.note,
         createdAt: stockMovements.createdAt,
         createdByName: users.name,
+        referenceType: stockMovements.referenceType,
+        referenceId: stockMovements.referenceId,
       })
       .from(stockMovements)
       .leftJoin(users, eq(users.id, stockMovements.createdByUserId))
@@ -857,8 +861,9 @@ export async function holdStock(
     });
   } catch (err) {
     const pg = pgError(err);
-    // Two CONCURRENT holds for one reference: both replaced the old set,
-    // both inserted, the loser hits the unique index. Retryable.
+    // Defense-in-depth: unreachable while every insert is preceded by a
+    // levels lock (same-reference holds serialize there), kept as a safety
+    // net should the lock protocol ever change.
     if (pg.code === "23505" && pg.text.includes("stock_reservations_ref_variant_key")) {
       throw new AppError({
         code: "concurrent_modification",
@@ -940,10 +945,10 @@ export async function consumeStock(
               eq(stockReservations.variantId, line.variantId),
             ),
           )
-          .returning({ expiresAt: stockReservations.expiresAt });
-        // Informational only (app-clock comparison): "held" means the
-        // buyer's guarantee was still standing when payment confirmed.
-        const wasHeld = deleted.length > 0 && deleted[0]!.expiresAt.getTime() > Date.now();
+          .returning({ stillActive: sql<boolean>`expires_at > now()` });
+        // Informational only for the order layer: "held" means the buyer's
+        // guarantee was still standing when payment confirmed.
+        const wasHeld = deleted.length > 0 && deleted[0]!.stillActive;
 
         const applied = await applyMovement(tx, {
           tenantId: ctx.tenantId,
