@@ -27,12 +27,15 @@ export const PERMISSIONS = [
   "customers:write",
   "marketing:read",
   "marketing:write",
+  "promotions:read",
+  "promotions:write",
   "analytics:read",
   "settings:read",
   "settings:write",
   "staff:read",
   "staff:write",
   "payments:configure",
+  "payments:write",
   "domains:manage",
   "billing:manage",
 ] as const;
@@ -49,12 +52,15 @@ const ALL = PERMISSIONS as readonly Permission[];
  *  · order_processor cannot refund. Refunds move money; fulfilment does not.
  *  · cashier cannot read analytics. A till operator does not need revenue.
  *  · only owner touches payments, billing and domains — the three that
- *    can take the store offline or redirect its money.
+ *    can take the store offline or redirect its money. `payments:write`
+ *    (gateway credentials) is in that class, alongside payments:configure.
  */
 export const ROLE_PERMISSIONS: Record<Role, readonly Permission[]> = {
   owner: ALL,
 
-  manager: ALL.filter((p) => p !== "billing:manage" && p !== "payments:configure"),
+  manager: ALL.filter(
+    (p) => p !== "billing:manage" && p !== "payments:configure" && p !== "payments:write",
+  ),
 
   catalog_manager: [
     "catalog:read",

@@ -5,3 +5,6 @@ export * from "./store";
 export * from "./logistics";
 export * from "./catalog";
 export * from "./inventory";
+export * from "./commerce";
+export * from "./payments";
+export * from "./promotions";

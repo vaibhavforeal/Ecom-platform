@@ -15,6 +15,10 @@ export const QUEUE_NAMES = {
   notifications: "notifications",
   media: "media",
   maintenance: "maintenance",
+  /** Order domain events + delayed checkout.expire jobs (jobId = order_events.id). */
+  orders: "orders",
+  /** Outbound gateway work — refunds run here, never in a web request. */
+  payments: "payments",
 } as const;
 
 /**

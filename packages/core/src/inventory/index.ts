@@ -48,3 +48,10 @@ export type ConsumeLineResult = {
   status: "held" | "unheld" | "untracked";
   movementId?: string;
 };
+
+export type RestockLineResult = {
+  variantId: string;
+  quantity: number;
+  status: "restocked" | "untracked";
+  movementId?: string;
+};
