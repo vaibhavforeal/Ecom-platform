@@ -82,11 +82,11 @@ export function breadcrumbJsonLd(trail: { name: string; url: string }[]): JsonLd
  * per variant, each at the same URL — reads as duplicate offers for one
  * page.
  *
- * `availability` reflects only what the catalog currently models:
- * whether the merchant has the variant switched on. Stock levels arrive
- * with the inventory ledger in Phase 2, and this becomes a real signal
- * then. Claiming OutOfStock we cannot substantiate would suppress the
- * listing; claiming InStock for a disabled variant would mislead.
+ * `availability` now reflects the inventory ledger. Prices still come
+ * from every ACTIVE variant — a sold-out product must keep its Offer
+ * (price + OutOfStock), because an offer that vanishes reads to Google
+ * as "no longer sold" rather than "temporarily out". A variant counts as
+ * in stock when it is untracked (null available) or tracked above zero.
  */
 export function productJsonLd(input: {
   product: ProductDetail;
@@ -97,10 +97,11 @@ export function productJsonLd(input: {
   const { product, url } = input;
 
   const sellable = product.variants.filter((v) => v.isActive);
+  const inStock = sellable.filter((v) => v.available === null || v.available > 0);
   const prices = sellable.map((v) => v.pricePaise);
   const currency = sellable[0]?.currency ?? "INR";
   const availability =
-    sellable.length > 0 ? "https://schema.org/InStock" : "https://schema.org/OutOfStock";
+    inStock.length > 0 ? "https://schema.org/InStock" : "https://schema.org/OutOfStock";
 
   const low = prices.length ? Math.min(...prices) : null;
   const high = prices.length ? Math.max(...prices) : null;

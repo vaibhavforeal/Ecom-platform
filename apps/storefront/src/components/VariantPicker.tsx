@@ -28,6 +28,8 @@ type Variant = {
   compareAtPaise: number | null;
   currency: string;
   isActive: boolean;
+  tracksInventory: boolean;
+  available: number | null;
 };
 
 export function VariantPicker({
@@ -37,7 +39,10 @@ export function VariantPicker({
   axes: OptionAxis[];
   variants: Variant[];
 }) {
-  const sellable = useMemo(() => variants.filter((v) => v.isActive), [variants]);
+  const sellable = useMemo(
+    () => variants.filter((v) => v.isActive && (v.available === null || v.available > 0)),
+    [variants],
+  );
 
   // Open on the cheapest variant, matching what the listing card
   // advertised. Anything else reads as a price that went up on click.
@@ -52,6 +57,14 @@ export function VariantPicker({
   );
 
   const selected = matchVariant(sellable, selection);
+
+  // Active but out of stock ≠ nonexistent: the shopper who sees
+  // "out of stock" waits or switches; one who sees "not available"
+  // concludes the combination was never made.
+  const activeMatch = matchVariant(
+    variants.filter((v) => v.isActive),
+    selection,
+  );
 
   if (axes.length === 0) return null;
 
@@ -103,7 +116,9 @@ export function VariantPicker({
             <span className="muted"> · SKU {selected.sku}</span>
           </>
         ) : (
-          <span className="muted">That combination is not available.</span>
+          <span className="muted">
+            {activeMatch ? "Out of stock." : "That combination is not available."}
+          </span>
         )}
       </p>
     </div>
