@@ -14,6 +14,7 @@ export const QUEUE_NAMES = {
   domains: "domains",
   notifications: "notifications",
   media: "media",
+  maintenance: "maintenance",
 } as const;
 
 /**

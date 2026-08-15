@@ -106,4 +106,54 @@ describe("inventory ledger integration on storefront", () => {
     const ldOut = productJsonLd({ product: soldOut, url: "https://x.test/p", organizationName: "X", imageUrls: [] });
     expect(JSON.stringify(ldOut)).toContain("schema.org/OutOfStock");
   });
+
+  it("active holds subtract from PDP availability; expired holds do not", async () => {
+    const mkTracked = async (title: string, slug: string, onHand: number) => {
+      const pid = randomUUID();
+      await admin`
+        INSERT INTO products (id, tenant_id, title, status, published_at)
+        VALUES (${pid}, ${tenantId}, ${title}, 'active', now())`;
+      await admin`
+        INSERT INTO url_slugs (tenant_id, slug, entity_type, entity_id)
+        VALUES (${tenantId}, ${slug}, 'product', ${pid})`;
+      const vid = randomUUID();
+      await admin`
+        INSERT INTO product_variants (id, tenant_id, product_id, sku, price_paise, weight_grams, tracks_inventory)
+        VALUES (${vid}, ${tenantId}, ${pid}, ${"HOLD-" + slug}, 49900, 100, true)`;
+      const [loc] = await admin<{ id: string }[]>`
+        SELECT id FROM locations WHERE tenant_id = ${tenantId} AND is_default`;
+      await admin`
+        INSERT INTO stock_levels (tenant_id, variant_id, location_id, on_hand)
+        VALUES (${tenantId}, ${vid}, ${loc!.id}, ${onHand})`;
+      return { pid, vid, locId: loc!.id };
+    };
+
+    const heldOut = await mkTracked("Held Out Product", "held-out-product", 2);
+    await admin`
+      INSERT INTO stock_reservations
+        (id, tenant_id, variant_id, location_id, quantity, reference_type, reference_id, expires_at)
+      VALUES (${randomUUID()}, ${tenantId}, ${heldOut.vid}, ${heldOut.locId}, 2,
+              'checkout', ${randomUUID()}, now() + interval '15 minutes')`;
+
+    const lapsed = await mkTracked("Lapsed Hold Product", "lapsed-hold-product", 2);
+    await admin`
+      INSERT INTO stock_reservations
+        (id, tenant_id, variant_id, location_id, quantity, reference_type, reference_id, expires_at)
+      VALUES (${randomUUID()}, ${tenantId}, ${lapsed.vid}, ${lapsed.locId}, 1,
+              'checkout', ${randomUUID()}, now() - interval '1 minute')`;
+
+    const heldOutPdp = await runDynamicRender(() => getCachedProduct(tenantId, heldOut.pid));
+    expect(heldOutPdp!.variants[0]!.available).toBe(0); // 2 on hand, 2 held
+
+    const lapsedPdp = await runDynamicRender(() => getCachedProduct(tenantId, lapsed.pid));
+    expect(lapsedPdp!.variants[0]!.available).toBe(2); // the hold lapsed; no write needed
+
+    const ldOut = productJsonLd({
+      product: heldOutPdp!,
+      url: "https://x.test/p2",
+      organizationName: "X",
+      imageUrls: [],
+    });
+    expect(JSON.stringify(ldOut)).toContain("schema.org/OutOfStock");
+  });
 });

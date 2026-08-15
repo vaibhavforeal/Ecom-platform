@@ -144,6 +144,11 @@ beforeAll(async () => {
     await admin`
       INSERT INTO stock_levels (tenant_id, variant_id, location_id, on_hand)
       VALUES (${tenantId}, ${variant!.id}, ${loc!.id}, 5)`;
+    await admin`
+      INSERT INTO stock_reservations
+        (id, tenant_id, variant_id, location_id, quantity, reference_type, reference_id, expires_at)
+      VALUES (${randomUUID()}, ${tenantId}, ${variant!.id}, ${loc!.id}, 1,
+              'checkout', ${randomUUID()}, now() + interval '15 minutes')`;
   };
   await mkStock(tenantA, productA);
   await mkStock(tenantB, productB);

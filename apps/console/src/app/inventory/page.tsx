@@ -87,6 +87,8 @@ export default async function InventoryPage({ searchParams }: Search) {
                 <th>Product</th>
                 <th>SKU</th>
                 <th style={{ textAlign: "right" }}>On hand</th>
+                <th style={{ textAlign: "right" }}>Reserved</th>
+                <th style={{ textAlign: "right" }}>Available</th>
                 <th></th>
               </tr>
             </thead>
@@ -116,6 +118,10 @@ export default async function InventoryPage({ searchParams }: Search) {
                       </>
                     )}
                   </td>
+                  <td style={{ textAlign: "right" }} className="muted">
+                    {row.reserved === 0 ? "—" : row.reserved}
+                  </td>
+                  <td style={{ textAlign: "right" }}>{row.available}</td>
                   <td style={{ textAlign: "right" }}>
                     <AdjustStock
                       variantId={row.variantId}

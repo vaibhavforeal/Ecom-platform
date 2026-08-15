@@ -258,4 +258,41 @@ describe("POST /api/inventory/movements", () => {
     // The replay wrote nothing, so it must purge nothing.
     expect(received.length).toBe(1);
   });
+
+  it("refuses an adjustment below active checkout holds with stock_held", async () => {
+    sessionToken = ownerToken;
+    // A fresh variant so this test owns its numbers (the suite's shared
+    // variant carries state from earlier tests).
+    const [v] = await admin<{ id: string }[]>`
+      INSERT INTO product_variants
+        (id, tenant_id, product_id, sku, price_paise, weight_grams, tracks_inventory, options)
+      VALUES (${randomUUID()}, ${tenantId}, ${productId},
+              ${"INVR-" + randomUUID().slice(0, 8)}, 9900, 250, true,
+              ${JSON.stringify({ Size: "S" })}::text::jsonb)
+      RETURNING id`;
+    const heldVariant = v!.id;
+
+    const seeded = await postMovement({ variantId: heldVariant, delta: 5, note: "opening" });
+    expect(seeded.status).toBe(201);
+
+    const [loc] = await admin<{ id: string }[]>`
+      SELECT id FROM locations WHERE tenant_id = ${tenantId} AND is_default`;
+    await admin`
+      INSERT INTO stock_reservations
+        (id, tenant_id, variant_id, location_id, quantity, reference_type, reference_id, expires_at)
+      VALUES (${randomUUID()}, ${tenantId}, ${heldVariant}, ${loc!.id}, 4,
+              'checkout', ${randomUUID()}, now() + interval '15 minutes')`;
+
+    const before = await ledgerCount(heldVariant);
+    const { status, data } = await postMovement({
+      variantId: heldVariant,
+      delta: -3, // 5 − 3 = 2, below the 4 held
+      note: "yank",
+    });
+    expect(status).toBe(422);
+    expect((data.error as { code: string }).code).toBe("stock_held");
+    const issues = (data.error as { details: { issues: { path: string }[] } }).details.issues;
+    expect(issues.some((i) => i.path === "delta")).toBe(true);
+    expect(await ledgerCount(heldVariant)).toBe(before);
+  });
 });

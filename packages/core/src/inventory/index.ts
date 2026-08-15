@@ -23,3 +23,28 @@ export const DEFAULT_LOW_STOCK_AT = 2;
 export function isLowStock(onHand: number, lowStockAt: number | null): boolean {
   return lowStockAt !== null && onHand <= lowStockAt;
 }
+
+/**
+ * How long a checkout hold lives. Covers a UPI/payment session; a
+ * platform constant, not per-tenant config, until a merchant asks.
+ */
+export const RESERVATION_TTL_MINUTES = 15;
+
+/** Who holds stock. Opaque to the inventory module; 'checkout' today. */
+export type ReservationReference = { type: string; id: string };
+
+export type HoldLineInput = { variantId: string; quantity: number };
+
+export type HoldLineResult = {
+  variantId: string;
+  quantity: number;
+  status: "held" | "untracked";
+};
+
+export type ConsumeLineResult = {
+  variantId: string;
+  quantity: number;
+  /** "unheld": the hold had lapsed but the stock was still free — the sale went through. */
+  status: "held" | "unheld" | "untracked";
+  movementId?: string;
+};

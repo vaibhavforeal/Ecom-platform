@@ -4,12 +4,19 @@ import { notFound } from "next/navigation";
 import { can } from "@platform/core";
 import { getMovements } from "@platform/core/inventory/server";
 import { and, eq, isNull, products, productVariants, withTenant } from "@platform/db";
+import type { StockMovementReason } from "@platform/db";
 
 import { requireActor } from "../../../lib/session";
 
 export const dynamic = "force-dynamic";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+const REASON_LABELS: Record<StockMovementReason, string> = {
+  opening_balance: "opening balance",
+  adjustment: "adjustment",
+  sale: "sale",
+};
 
 /** The timestamped answer to "why does this say 3 when I have 5?". */
 export default async function MovementHistoryPage({
@@ -84,7 +91,10 @@ export default async function MovementHistoryPage({
                 <tr key={m.id}>
                   <td>{m.createdAt.toLocaleString("en-IN")}</td>
                   <td style={{ textAlign: "right" }}>{m.delta > 0 ? `+${m.delta}` : m.delta}</td>
-                  <td>{m.reason === "opening_balance" ? "opening balance" : "adjustment"}</td>
+                  <td>
+                    {REASON_LABELS[m.reason]}
+                    {m.referenceType && <span className="muted"> · {m.referenceType}</span>}
+                  </td>
                   <td>{m.note ?? <span className="muted">—</span>}</td>
                   <td>{m.createdByName ?? <span className="muted">—</span>}</td>
                 </tr>

@@ -9,7 +9,9 @@ import { QUEUE_NAMES, defaultJobOptions } from "@platform/core";
  * THE CONTRACT: every job payload carries `tenantId`, and every handler's
  * first act is withTenant(job.data.tenantId, …). A job that infers its
  * tenant from anything else — a lookup, a default, "the only tenant" —
- * is a cross-tenant bug waiting for a busy Diwali evening.
+ * is a cross-tenant bug waiting for a busy Diwali evening. The single
+ * exception is the maintenance queue, whose jobs are platform-wide by
+ * design and carry no tenantId.
  *
  * `TenantJob` makes that contract a type error to break.
  *
@@ -36,8 +38,19 @@ export const mediaQueue = new Queue<TenantJob<{ mediaId: string }>>(
   { connection, defaultJobOptions },
 );
 
+/**
+ * Platform maintenance — the ONE queue whose jobs carry no tenantId.
+ * A sweep fans out across tenants itself (withTenant per tenant); see
+ * jobs/sweep-reservations.ts for why a cross-tenant query cannot work.
+ */
+export const maintenanceQueue = new Queue<Record<string, never>>(
+  QUEUE_NAMES.maintenance,
+  { connection, defaultJobOptions },
+);
+
 export async function closeQueues(): Promise<void> {
   await domainsQueue.close();
   await mediaQueue.close();
+  await maintenanceQueue.close();
   await connection.quit();
 }

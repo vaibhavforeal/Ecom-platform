@@ -9,9 +9,10 @@ import { closeConnections } from "@platform/db";
 
 import { processMedia } from "./jobs/process-media";
 import type { ProcessMediaJob } from "./jobs/process-media";
+import { sweepReservations } from "./jobs/sweep-reservations";
 import { verifyDomain } from "./jobs/verify-domain";
 import type { VerifyDomainJob } from "./jobs/verify-domain";
-import { QUEUE_NAMES, closeQueues, connection } from "./queues";
+import { QUEUE_NAMES, closeQueues, connection, maintenanceQueue } from "./queues";
 
 /**
  * Worker entrypoint.
@@ -56,6 +57,17 @@ const workers = [
     },
     { connection, concurrency: 2 },
   ),
+
+  new Worker(
+    QUEUE_NAMES.maintenance,
+    async (job) => {
+      log("job.start", { queue: job.queueName, jobId: job.id });
+      const result = await sweepReservations();
+      log("job.done", { jobId: job.id, ...result });
+      return result;
+    },
+    { connection, concurrency: 1 },
+  ),
 ];
 
 for (const w of workers) {
@@ -72,6 +84,13 @@ for (const w of workers) {
 }
 
 log("worker.started", { queues: workers.map((w) => w.name) });
+
+// Daily reservation GC. upsertJobScheduler is idempotent across
+// restarts — one scheduler, however many times the worker boots.
+maintenanceQueue
+  .upsertJobScheduler("sweep-reservations", { every: 86_400_000 })
+  .then(() => log("scheduler.registered", { job: "sweep-reservations" }))
+  .catch((err) => log("worker.error", { queue: "maintenance", error: (err as Error).message }));
 
 /**
  * Graceful shutdown. `Worker.close()` waits for in-flight jobs to finish
