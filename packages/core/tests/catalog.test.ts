@@ -28,6 +28,9 @@ import type { CategoryNode, OptionAxis } from "../src/catalog/index";
 // pure, but that barrel also pulls in the query layer and therefore the
 // postgres driver, which has no business in the unit suite.
 import { normalizeSearchQuery, toPrefixTsQuery } from "../src/catalog/search";
+import { mergeVariant } from "../src/catalog/bulk";
+import type { CsvVariantDraft } from "../src/catalog/csv";
+import type { ConsoleVariant } from "../src/catalog/server";
 
 // ───────────────────────────────────────────────────────────────
 // Slugs
@@ -550,5 +553,60 @@ describe("storefront cache tags", () => {
       "t:11111111-2222-3333-4444-555555555555:slugs",
       "t:11111111-2222-3333-4444-555555555555:categories",
     ]);
+  });
+});
+
+// ───────────────────────────────────────────────────────────────
+// Bulk merge
+// ───────────────────────────────────────────────────────────────
+describe("mergeVariant", () => {
+  it("preserves stored tracksInventory: true when the CSV cell is blank", () => {
+    // The parse step leaves tracksInventory undefined for a blank cell.
+    // This test asserts the MERGE step preserves the stored value rather
+    // than defaulting to false, which is what a regression to
+    // `row.tracksInventory ?? false` (without the `existing` term) would do.
+    const stored: ConsoleVariant = {
+      id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+      sku: "TEST-1",
+      barcode: null,
+      options: {},
+      pricePaise: 100000,
+      compareAtPaise: null,
+      costPaise: null,
+      currency: "INR",
+      weightGrams: 100,
+      lowStockAt: null,
+      tracksInventory: true,
+      imageMediaId: null,
+      isActive: true,
+    };
+
+    const row: CsvVariantDraft = {
+      row: 2,
+      sku: "TEST-1",
+      options: {},
+      pricePaise: 120000,
+      weightGrams: 100,
+      // tracksInventory is UNDEFINED — the parse step for a blank cell
+    };
+
+    const merged = mergeVariant(row, stored);
+    expect(merged.tracksInventory).toBe(true);
+  });
+
+  it("defaults tracksInventory to false when no stored variant exists and the CSV cell is blank", () => {
+    // A new variant with no stored value and undefined in the CSV should
+    // default to false (untracked).
+    const row: CsvVariantDraft = {
+      row: 2,
+      sku: "NEW-1",
+      options: {},
+      pricePaise: 100000,
+      weightGrams: 100,
+      // tracksInventory is UNDEFINED
+    };
+
+    const merged = mergeVariant(row, null);
+    expect(merged.tracksInventory).toBe(false);
   });
 });

@@ -488,7 +488,7 @@ function pick<T>(fromFile: T | null | undefined, stored: T | null): T | null {
   return fromFile === undefined ? stored : fromFile;
 }
 
-function mergeVariant(row: CsvVariantDraft, existing: ConsoleVariant | null): VariantInput {
+export function mergeVariant(row: CsvVariantDraft, existing: ConsoleVariant | null): VariantInput {
   return {
     id: existing?.id ?? null,
     sku: row.sku,
