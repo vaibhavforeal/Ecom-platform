@@ -142,8 +142,18 @@ export function rlsStatementsFor(table: string): string[] {
 export function grantStatements(appRole: string): string[] {
   const tables = allTables().map((t) => t.name);
   // An audit trail — or a stock ledger — the application can rewrite is
-  // neither. Both are append-only by ABSENT GRANT, not by discipline.
-  const appendOnly = new Set(["audit_log", "stock_movements"]);
+  // neither. All of these are append-only by ABSENT GRANT, not by
+  // discipline: order timelines, raw webhook evidence, issued invoices
+  // (a document that never mutates) and coupon redemptions (the limit
+  // enforcer — rewritable slots would un-enforce the limit).
+  const appendOnly = new Set([
+    "audit_log",
+    "stock_movements",
+    "order_events",
+    "payment_webhook_events",
+    "invoices",
+    "coupon_redemptions",
+  ]);
 
   const stmts = [
     `GRANT USAGE ON SCHEMA public TO ${appRole};`,

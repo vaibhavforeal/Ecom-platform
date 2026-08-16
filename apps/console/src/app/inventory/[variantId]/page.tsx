@@ -16,6 +16,7 @@ const REASON_LABELS: Record<StockMovementReason, string> = {
   opening_balance: "opening balance",
   adjustment: "adjustment",
   sale: "sale",
+  cancellation_restock: "cancellation restock",
 };
 
 /** The timestamped answer to "why does this say 3 when I have 5?". */

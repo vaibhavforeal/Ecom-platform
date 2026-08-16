@@ -23,7 +23,13 @@ import { purgeStorefrontCache } from "../catalog/purge";
 import type { WriteContext } from "../catalog/writes";
 import { AppError } from "../errors";
 import { RESERVATION_TTL_MINUTES, STOCK_ADJUSTMENT_MAX } from "./index";
-import type { ConsumeLineResult, HoldLineInput, HoldLineResult, ReservationReference } from "./index";
+import type {
+  ConsumeLineResult,
+  HoldLineInput,
+  HoldLineResult,
+  ReservationReference,
+  RestockLineResult,
+} from "./index";
 
 /**
  * The inventory ledger's single write door. SERVER ONLY.
@@ -87,10 +93,16 @@ export class StockHeldError extends AppError {
       code: "stock_held",
       message: `Movement refused: on-hand would be ${resultingOnHand} with ${reserved} held by active checkouts (soonest expiry ${soonestExpiry?.toISOString() ?? "unknown"})`,
       status: 422,
-      publicMessage: `Buyers are checking out with ${reserved} of these right now; stock cannot drop below what is held. Holds expire within 15 minutes.`,
+      // Audience-neutral wording (PHASE2_FOLLOWUPS contract): this error
+      // now reaches buyers via the checkout path, not only merchants
+      // adjusting stock, so it must not presume either.
+      publicMessage: `${reserved} of these are held by checkouts in progress, and stock cannot drop below what is held. Holds expire within ${RESERVATION_TTL_MINUTES} minutes — please try again shortly.`,
       details: {
         issues: [
-          { path: "delta", message: `${reserved} held by active checkouts — retry after the holds expire.` },
+          {
+            path: "delta",
+            message: `${reserved} held by active checkouts — try again after the holds expire (within ${RESERVATION_TTL_MINUTES} minutes).`,
+          },
         ],
       },
     });
@@ -896,103 +908,156 @@ export async function releaseStock(
 }
 
 /**
- * Turn a reference's hold into sale movements, atomically. Lines come
- * from the CALLER (the order being created is the authority) — never
- * from the hold rows, which GC may erase mid-payment. Per line the hold
- * row is deleted FIRST, so applyMovement's stock_held guard no longer
- * counts it; if the stock is genuinely gone the on_hand CHECK refuses
- * and the WHOLE consume rolls back (zero sale movements survive).
+ * A consume line's movement failed at the database — almost always the
+ * on_hand CHECK (23514, the stolen-unit path). Thrown by
+ * consumeStockWithin because the surrounding transaction is already
+ * aborted at that point: the typed refusal (which needs a fresh
+ * availability read) can only be composed OUTSIDE the tx, so this
+ * wrapper carries the failing line out. `cause` preserves the Postgres
+ * error for pgError-style classification. Checkout's confirm flow treats
+ * this and StockHeldError identically (design D2a): roll back, cancel,
+ * refund.
+ */
+export class ConsumeShortfallError extends Error {
+  readonly line: HoldLineInput;
+
+  constructor(line: HoldLineInput, cause: unknown) {
+    super(`Consume failed on variant ${line.variantId} (quantity ${line.quantity})`, { cause });
+    this.name = "ConsumeShortfallError";
+    this.line = line;
+  }
+}
+
+/**
+ * Turn a reference's hold into sale movements, inside the CALLER's
+ * transaction — the extract-method seam Phase 2 checkout confirms
+ * through (same tx as the order transition + invoice). Lines come from
+ * the CALLER (the order being created is the authority) — never from the
+ * hold rows, which GC may erase mid-payment. Per line the hold row is
+ * deleted FIRST, so applyMovement's stock_held guard no longer counts
+ * it; if the stock is genuinely gone the on_hand CHECK refuses, the
+ * caller's WHOLE tx rolls back (zero sale movements survive), and a
+ * ConsumeShortfallError carries the failing line out.
+ *
+ * Failure contract for callers: ConsumeShortfallError (insufficient
+ * stock, tx aborted) | StockHeldError (other references hold the
+ * remainder) — handle BOTH (D2a).
+ */
+export async function consumeStockWithin(
+  tx: Tx,
+  ctx: ReservationContext,
+  input: { reference: ReservationReference; lines: HoldLineInput[] },
+): Promise<{ lines: ConsumeLineResult[]; productIds: string[] }> {
+  validateLines(input.lines);
+  const variants = await loadLineVariants(
+    tx,
+    input.lines.map((l) => l.variantId),
+  );
+  const location = await ensureDefaultLocation(tx, ctx.tenantId);
+
+  const tracked = input.lines
+    .filter((l) => variants.get(l.variantId)!.tracksInventory)
+    .sort((a, b) => (a.variantId < b.variantId ? -1 : 1));
+  await lockLevels(tx, location.id, tracked);
+
+  const results = new Map<string, ConsumeLineResult>();
+  for (const line of input.lines) {
+    if (!variants.get(line.variantId)!.tracksInventory) {
+      results.set(line.variantId, {
+        variantId: line.variantId,
+        quantity: line.quantity,
+        status: "untracked",
+      });
+    }
+  }
+
+  for (const line of tracked) {
+    const deleted = await tx
+      .delete(stockReservations)
+      .where(
+        and(
+          eq(stockReservations.referenceType, input.reference.type),
+          eq(stockReservations.referenceId, input.reference.id),
+          eq(stockReservations.variantId, line.variantId),
+        ),
+      )
+      .returning({ stillActive: sql<boolean>`expires_at > now()` });
+    // Informational only for the order layer: "held" means the buyer's
+    // guarantee was still standing when payment confirmed.
+    const wasHeld = deleted.length > 0 && deleted[0]!.stillActive;
+
+    let applied: { movementId: string; onHand: number };
+    try {
+      applied = await applyMovement(tx, {
+        tenantId: ctx.tenantId,
+        variantId: line.variantId,
+        productId: variants.get(line.variantId)!.productId,
+        locationId: location.id,
+        delta: -line.quantity,
+        reason: "sale",
+        note: null,
+        idempotencyKey: null,
+        createdByUserId: null,
+        referenceType: input.reference.type,
+        referenceId: input.reference.id,
+      });
+    } catch (err) {
+      // Typed refusals (StockHeldError) pass through intact; only raw
+      // database errors get the line attached for the outside-tx mapping.
+      if (err instanceof AppError) throw err;
+      throw new ConsumeShortfallError(line, err);
+    }
+    results.set(line.variantId, {
+      variantId: line.variantId,
+      quantity: line.quantity,
+      status: wasHeld ? "held" : "unheld",
+      movementId: applied.movementId,
+    });
+  }
+
+  // Lines the order no longer carries: released — the order is the
+  // authority on what was bought.
+  await tx
+    .delete(stockReservations)
+    .where(
+      and(
+        eq(stockReservations.referenceType, input.reference.type),
+        eq(stockReservations.referenceId, input.reference.id),
+      ),
+    );
+
+  return {
+    lines: input.lines.map((l) => results.get(l.variantId)!),
+    productIds: [...new Set(tracked.map((l) => variants.get(l.variantId)!.productId))],
+  };
+}
+
+/**
+ * Turn a reference's hold into sale movements, atomically, in a
+ * transaction of its own. Thin wrapper over consumeStockWithin — public
+ * API unchanged: same signature, same typed errors
+ * (InsufficientAvailabilityError | StockHeldError), same post-commit
+ * purge.
  */
 export async function consumeStock(
   ctx: ReservationContext,
   input: { reference: ReservationReference; lines: HoldLineInput[] },
 ): Promise<{ lines: ConsumeLineResult[] }> {
   validateLines(input.lines);
-  let currentLine: HoldLineInput | null = null;
   let outcome: { lines: ConsumeLineResult[]; productIds: string[] };
   try {
-    outcome = await withTenant(ctx.tenantId, async (tx) => {
-      const variants = await loadLineVariants(
-        tx,
-        input.lines.map((l) => l.variantId),
-      );
-      const location = await ensureDefaultLocation(tx, ctx.tenantId);
-
-      const tracked = input.lines
-        .filter((l) => variants.get(l.variantId)!.tracksInventory)
-        .sort((a, b) => (a.variantId < b.variantId ? -1 : 1));
-      await lockLevels(tx, location.id, tracked);
-
-      const results = new Map<string, ConsumeLineResult>();
-      for (const line of input.lines) {
-        if (!variants.get(line.variantId)!.tracksInventory) {
-          results.set(line.variantId, {
-            variantId: line.variantId,
-            quantity: line.quantity,
-            status: "untracked",
-          });
-        }
-      }
-
-      for (const line of tracked) {
-        currentLine = line;
-        const deleted = await tx
-          .delete(stockReservations)
-          .where(
-            and(
-              eq(stockReservations.referenceType, input.reference.type),
-              eq(stockReservations.referenceId, input.reference.id),
-              eq(stockReservations.variantId, line.variantId),
-            ),
-          )
-          .returning({ stillActive: sql<boolean>`expires_at > now()` });
-        // Informational only for the order layer: "held" means the buyer's
-        // guarantee was still standing when payment confirmed.
-        const wasHeld = deleted.length > 0 && deleted[0]!.stillActive;
-
-        const applied = await applyMovement(tx, {
-          tenantId: ctx.tenantId,
-          variantId: line.variantId,
-          productId: variants.get(line.variantId)!.productId,
-          locationId: location.id,
-          delta: -line.quantity,
-          reason: "sale",
-          note: null,
-          idempotencyKey: null,
-          createdByUserId: null,
-          referenceType: input.reference.type,
-          referenceId: input.reference.id,
-        });
-        results.set(line.variantId, {
-          variantId: line.variantId,
-          quantity: line.quantity,
-          status: wasHeld ? "held" : "unheld",
-          movementId: applied.movementId,
-        });
-      }
-      currentLine = null;
-
-      // Lines the order no longer carries: released — the order is the
-      // authority on what was bought.
-      await tx
-        .delete(stockReservations)
-        .where(
-          and(
-            eq(stockReservations.referenceType, input.reference.type),
-            eq(stockReservations.referenceId, input.reference.id),
-          ),
-        );
-
-      return {
-        lines: input.lines.map((l) => results.get(l.variantId)!),
-        productIds: [...new Set(tracked.map((l) => variants.get(l.variantId)!.productId))],
-      };
-    });
+    outcome = await withTenant(ctx.tenantId, (tx) => consumeStockWithin(tx, ctx, input));
   } catch (err) {
     const pg = pgError(err);
     // The stolen path: an expired hold lost its unit to someone else.
-    if (pg.code === "23514" && pg.text.includes("stock_levels_on_hand_check") && currentLine) {
-      const line: HoldLineInput = currentLine;
+    // The tx is already rolled back, so availability comes from a fresh
+    // read.
+    if (
+      err instanceof ConsumeShortfallError &&
+      pg.code === "23514" &&
+      pg.text.includes("stock_levels_on_hand_check")
+    ) {
+      const line = err.line;
       const available = await withTenant(ctx.tenantId, async (tx) => {
         const map = await getAvailability(tx, [line.variantId]);
         return map.get(line.variantId)?.available ?? 0;
@@ -1010,6 +1075,75 @@ export async function consumeStock(
     await purgeStorefrontCache(ctx.tenantId, catalogPurgeTags(ctx.tenantId, outcome.productIds));
   }
   return { lines: outcome.lines };
+}
+
+/**
+ * Put cancelled order lines back on the shelf, inside the CALLER's
+ * transaction (the cancel tx: restock + refund intent + transition are
+ * one atomic fact). Positive movements with reason
+ * `cancellation_restock` and the caller's reference
+ * ({type:'order', id}) — written through the same applyMovement door as
+ * every other movement, so the ledger + projection stay reconcilable.
+ * Untracked lines are skipped, exactly like consume. Positive deltas
+ * cannot trip the on_hand CHECK or the stock_held guard.
+ */
+export async function restockWithin(
+  tx: Tx,
+  ctx: ReservationContext,
+  lines: HoldLineInput[],
+  reference: ReservationReference,
+): Promise<{ lines: RestockLineResult[]; productIds: string[] }> {
+  validateLines(lines);
+  const variants = await loadLineVariants(
+    tx,
+    lines.map((l) => l.variantId),
+  );
+  const location = await ensureDefaultLocation(tx, ctx.tenantId);
+
+  const tracked = lines
+    .filter((l) => variants.get(l.variantId)!.tracksInventory)
+    .sort((a, b) => (a.variantId < b.variantId ? -1 : 1));
+  // Same lock discipline as consume: a concurrent consume/restock pair on
+  // overlapping variants serializes here instead of deadlocking.
+  await lockLevels(tx, location.id, tracked);
+
+  const results = new Map<string, RestockLineResult>();
+  for (const line of lines) {
+    if (!variants.get(line.variantId)!.tracksInventory) {
+      results.set(line.variantId, {
+        variantId: line.variantId,
+        quantity: line.quantity,
+        status: "untracked",
+      });
+    }
+  }
+
+  for (const line of tracked) {
+    const applied = await applyMovement(tx, {
+      tenantId: ctx.tenantId,
+      variantId: line.variantId,
+      productId: variants.get(line.variantId)!.productId,
+      locationId: location.id,
+      delta: line.quantity,
+      reason: "cancellation_restock",
+      note: null,
+      idempotencyKey: null,
+      createdByUserId: null,
+      referenceType: reference.type,
+      referenceId: reference.id,
+    });
+    results.set(line.variantId, {
+      variantId: line.variantId,
+      quantity: line.quantity,
+      status: "restocked",
+      movementId: applied.movementId,
+    });
+  }
+
+  return {
+    lines: lines.map((l) => results.get(l.variantId)!),
+    productIds: [...new Set(tracked.map((l) => variants.get(l.variantId)!.productId))],
+  };
 }
 
 export type Availability = { onHand: number; reserved: number; available: number };

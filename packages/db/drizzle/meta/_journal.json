@@ -57,6 +57,13 @@
       "when": 1786796354499,
       "tag": "0007_nasty_the_watchers",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1786823694756,
+      "tag": "0008_glorious_sally_floyd",
+      "breakpoints": true
     }
   ]
 }

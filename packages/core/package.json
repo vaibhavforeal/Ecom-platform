@@ -12,7 +12,23 @@
     "./catalog/server": "./src/catalog/server.ts",
     "./media": "./src/media/index.ts",
     "./inventory": "./src/inventory/index.ts",
-    "./inventory/server": "./src/inventory/server.ts"
+    "./inventory/server": "./src/inventory/server.ts",
+    "./tax": "./src/tax/index.ts",
+    "./invoices": "./src/invoices/index.ts",
+    "./invoices/server": "./src/invoices/server.ts",
+    "./orders": "./src/orders/index.ts",
+    "./orders/server": "./src/orders/server.ts",
+    "./cart": "./src/cart/index.ts",
+    "./cart/server": "./src/cart/server.ts",
+    "./checkout": "./src/checkout/index.ts",
+    "./checkout/server": "./src/checkout/server.ts",
+    "./payments": "./src/payments/index.ts",
+    "./payments/server": "./src/payments/server.ts",
+    "./promotions": "./src/promotions/index.ts",
+    "./promotions/server": "./src/promotions/server.ts",
+    "./serviceability": "./src/serviceability/index.ts",
+    "./serviceability/server": "./src/serviceability/server.ts",
+    "./customers/server": "./src/customers/server.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
@@ -21,6 +37,7 @@
   },
   "dependencies": {
     "@platform/db": "workspace:*",
+    "bullmq": "^5.34.4",
     "ioredis": "^5.4.1",
     "sanitize-html": "^2.14.0",
     "uuid": "^11.0.3",

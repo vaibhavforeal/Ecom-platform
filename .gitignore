@@ -37,3 +37,5 @@ infra/caddy/config/
 infra/env/production.env
 infra/docker/pgbouncer/userlist.prod.txt
 infra/caddy/root.crt
+apps/*/AGENTS.md
+apps/*/CLAUDE.md

@@ -6,6 +6,6 @@
     // Separate build info, or the two projects clobber each other's.
     "incremental": false
   },
-  "include": ["tests/**/*.ts", "vitest.integration.config.ts"],
+  "include": ["tests/**/*.ts", "vitest.config.ts", "vitest.integration.config.ts"],
   "exclude": ["node_modules"]
 }

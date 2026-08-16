@@ -115,7 +115,92 @@ export type SearchIndexing = (typeof SEARCH_INDEXING_MODES)[number];
  * `opening_balance` is chosen automatically for a variant's first
  * movement; everything merchant-initiated after that is `adjustment`.
  * `sale` is written ONLY by consumeStock (a consumed checkout hold) —
- * no route accepts a client-supplied reason.
+ * no route accepts a client-supplied reason. `cancellation_restock` is
+ * written ONLY by restockWithin (pre-shipment order cancel); RTO reasons
+ * arrive with Phase 3 logistics.
  */
-export const STOCK_MOVEMENT_REASONS = ["opening_balance", "adjustment", "sale"] as const;
+export const STOCK_MOVEMENT_REASONS = [
+  "opening_balance",
+  "adjustment",
+  "sale",
+  "cancellation_restock",
+] as const;
 export type StockMovementReason = (typeof STOCK_MOVEMENT_REASONS)[number];
+
+// ───────────────────────────────────────────────────────────────
+// Phase 2 commerce core (orders, payments, promotions)
+// ───────────────────────────────────────────────────────────────
+
+/**
+ * The FULL blueprint order-state set ships at once; the transition table
+ * in `@platform/core/orders` is the gate that keeps Phase-3 edges
+ * (RTO/returns) unreachable. Shipping the whole set now means those
+ * phases are a code change, not a CHECK-constraint migration.
+ */
+export const ORDER_STATUSES = [
+  "pending_payment",
+  "confirmed",
+  "processing",
+  "ready_to_ship",
+  "shipped",
+  "out_for_delivery",
+  "delivered",
+  "rto_initiated",
+  "rto_delivered",
+  "return_requested",
+  "return_picked",
+  "refunded",
+  "cancelled",
+  "abandoned",
+] as const;
+export type OrderStatus = (typeof ORDER_STATUSES)[number];
+
+export const ORDER_PAYMENT_STATUSES = [
+  "pending",
+  "partially_paid",
+  "paid",
+  "refund_initiated",
+  "refunded",
+] as const;
+export type OrderPaymentStatus = (typeof ORDER_PAYMENT_STATUSES)[number];
+
+/** Phase 3 logistics writes this; modeled now so history needs no backfill. */
+export const ORDER_FULFILMENT_STATUSES = [
+  "unfulfilled",
+  "partially_shipped",
+  "shipped",
+  "delivered",
+  "rto",
+] as const;
+export type OrderFulfilmentStatus = (typeof ORDER_FULFILMENT_STATUSES)[number];
+
+export const ORDER_CHANNELS = ["web", "pos", "whatsapp", "manual"] as const;
+export type OrderChannel = (typeof ORDER_CHANNELS)[number];
+
+/** How the buyer chose to pay at checkout (D5: full COD ships in Phase 2). */
+export const CHECKOUT_PAYMENT_MODES = ["prepaid", "cod", "cod_advance"] as const;
+export type CheckoutPaymentMode = (typeof CHECKOUT_PAYMENT_MODES)[number];
+
+export const CART_STATUSES = ["active", "converted"] as const;
+export type CartStatus = (typeof CART_STATUSES)[number];
+
+/** BYOG gateways. `mock` is the dev/CI driver — fail-closed in production. */
+export const PAYMENT_PROVIDER_CODES = ["razorpay", "mock"] as const;
+export type PaymentProviderCode = (typeof PAYMENT_PROVIDER_CODES)[number];
+
+export const PAYMENT_STATUSES = ["created", "authorized", "captured", "failed"] as const;
+export type PaymentStatus = (typeof PAYMENT_STATUSES)[number];
+
+export const REFUND_STATUSES = ["pending", "processing", "processed", "failed"] as const;
+export type RefundStatus = (typeof REFUND_STATUSES)[number];
+
+/** Unregistered/composition tenants issue a Bill of Supply, never a Tax Invoice. */
+export const INVOICE_DOC_TYPES = ["tax_invoice", "bill_of_supply"] as const;
+export type InvoiceDocType = (typeof INVOICE_DOC_TYPES)[number];
+
+export const PROMOTION_STATUSES = ["draft", "active", "archived"] as const;
+export type PromotionStatus = (typeof PROMOTION_STATUSES)[number];
+
+/** Shipping is a taxable LINE on the order, not an afterthought column. */
+export const ORDER_LINE_KINDS = ["item", "shipping"] as const;
+export type OrderLineKind = (typeof ORDER_LINE_KINDS)[number];
